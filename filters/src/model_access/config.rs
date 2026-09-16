@@ -39,7 +39,7 @@ pub(super) struct ModelAccessConfig {
     #[serde(default = "default_max_body_bytes")]
     pub max_body_bytes: usize,
 
-    /// Metadata key for user's group (set by api_key_auth or jwt_auth).
+    /// Metadata key for user's group (set by `api_key_auth` or `jwt_auth`).
     #[serde(default = "default_group_metadata_key")]
     pub group_metadata_key: String,
 }
@@ -68,10 +68,12 @@ pub(super) enum AccessMode {
     Denylist,
 }
 
+/// Default for `max_body_bytes`.
 fn default_max_body_bytes() -> usize {
     65_536
 }
 
+/// Default for `group_metadata_key`.
 fn default_group_metadata_key() -> String {
     "x-tenant-group".to_owned()
 }
@@ -83,10 +85,10 @@ pub(super) fn validate_config(cfg: &ModelAccessConfig) -> Result<(), String> {
     }
     for (i, o) in cfg.overrides.iter().enumerate() {
         if o.groups.is_empty() {
-            return Err(format!("override[{}]: groups must not be empty", i));
+            return Err(format!("override[{i}]: groups must not be empty"));
         }
         if o.models.is_empty() {
-            return Err(format!("override[{}]: models must not be empty", i));
+            return Err(format!("override[{i}]: models must not be empty"));
         }
     }
     Ok(())
