@@ -51,6 +51,7 @@ enum ModelPattern {
 }
 
 impl ModelPattern {
+    /// Compiles a pattern string (`*`, `prefix*`, or exact name).
     fn from_str(s: &str) -> Self {
         if s == "*" {
             Self::Wildcard
@@ -61,6 +62,7 @@ impl ModelPattern {
         }
     }
 
+    /// Returns `true` if `model` is matched by this pattern.
     fn matches(&self, model: &str) -> bool {
         match self {
             Self::Wildcard => true,
@@ -76,11 +78,14 @@ impl ModelPattern {
 
 /// A compiled access rule (default or per-group override).
 struct AccessRule {
+    /// Allowlist or denylist semantics.
     mode: AccessMode,
+    /// Compiled model patterns the rule matches against.
     patterns: Vec<ModelPattern>,
 }
 
 impl AccessRule {
+    /// Returns `true` if `model` passes this rule.
     fn is_allowed(&self, model: &str) -> bool {
         let matched = self.patterns.iter().any(|p| p.matches(model));
         match self.mode {
@@ -96,7 +101,9 @@ impl AccessRule {
 
 /// A compiled group override with its group membership check.
 struct GroupRule {
+    /// Group names this override applies to.
     groups: Vec<String>,
+    /// The access rule applied to members of `groups`.
     rule: AccessRule,
 }
 
@@ -208,6 +215,7 @@ impl ModelAccessFilter {
 /// Minimal struct to extract only the `model` field from request JSON.
 #[derive(Deserialize)]
 struct ModelField {
+    /// Requested model name, absent for malformed bodies.
     model: Option<String>,
 }
 
@@ -237,12 +245,11 @@ impl HttpFilter for ModelAccessFilter {
             return Ok(FilterAction::Continue);
         };
 
-        let model = match serde_json::from_slice::<ModelField>(data) {
-            Ok(parsed) => parsed.model,
-            Err(_) => {
-                debug!("model_access: failed to parse request body, allowing");
-                return Ok(FilterAction::Continue);
-            },
+        let model = if let Ok(parsed) = serde_json::from_slice::<ModelField>(data) {
+            parsed.model
+        } else {
+            debug!("model_access: failed to parse request body, allowing");
+            return Ok(FilterAction::Continue);
         };
 
         let Some(model_name) = model else {
@@ -250,7 +257,7 @@ impl HttpFilter for ModelAccessFilter {
             return Ok(FilterAction::Continue);
         };
 
-        let group = ctx.filter_metadata.get(&self.group_metadata_key).map(|s| s.as_str());
+        let group = ctx.filter_metadata.get(&self.group_metadata_key).map(String::as_str);
         let rule = self.find_rule(group);
 
         if rule.is_allowed(&model_name) {
@@ -258,7 +265,7 @@ impl HttpFilter for ModelAccessFilter {
             Ok(FilterAction::Continue)
         } else {
             debug!(model = %model_name, group = ?group, "model_access: denied");
-            let msg = format!("model '{}' is not permitted by access policy", model_name);
+            let msg = format!("model '{model_name}' is not permitted by access policy");
             Ok(FilterAction::Reject(Rejection {
                 status: 403,
                 body: Some(Bytes::from(msg)),

@@ -49,6 +49,7 @@ bogus: true
 // -----------------------------------------------------------------------------
 
 #[tokio::test]
+#[expect(clippy::too_many_lines, reason = "mock setup + request + metadata assertions")]
 async fn valid_key_passes_and_writes_metadata() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -137,6 +138,10 @@ async fn missing_key_rejected() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "two-request cache flow needs both callouts counted"
+)]
 async fn cache_hit_skips_callout() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -159,8 +164,8 @@ async fn cache_hit_skips_callout() {
     req1.headers
         .insert("x-api-key", HeaderValue::from_static("sk-oai-cached"));
     let mut ctx1 = make_filter_context(&req1);
-    let _action = filter.on_request(&mut ctx1).await.unwrap();
-    drop(_action);
+    let action = filter.on_request(&mut ctx1).await.unwrap();
+    drop(action);
 
     // Second request — cache hit, no callout.
     let mut req2 = make_request(Method::POST, "/v1/messages");
@@ -200,8 +205,8 @@ async fn key_header_stripped_from_upstream() {
         .insert("x-api-key", HeaderValue::from_static("sk-oai-strip"));
 
     let mut ctx = make_filter_context(&req);
-    let _action = filter.on_request(&mut ctx).await.unwrap();
-    drop(_action);
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    drop(action);
 
     assert!(
         ctx.request_headers_to_remove.iter().any(|h| h.as_str() == "x-api-key"),

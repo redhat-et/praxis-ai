@@ -41,8 +41,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use praxis_ai_apis::json_body::replace_json_body;
 use praxis_filter::{
-    BodyAccess, BodyMode, FilterAction, FilterError, HttpFilter, HttpFilterContext,
-    parse_filter_config,
+    BodyAccess, BodyMode, FilterAction, FilterError, HttpFilter, HttpFilterContext, parse_filter_config,
 };
 use serde_json::Value;
 use tracing::debug;
@@ -64,19 +63,23 @@ const QWEN_TOOL_RESULT_TYPES: &[&str] = &["text", "image"];
 /// Default maximum request body bytes.
 const DEFAULT_MAX_BODY_BYTES: usize = 4_194_304; // 4 MiB — agentic sessions send large contexts
 
+/// Parsed YAML config for the `content_normalize` filter.
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ContentNormalizeConfig {
+    /// Maximum request body size accepted by the filter.
     #[serde(default = "default_max_body_bytes")]
     max_body_bytes: usize,
 }
 
+/// Default for `max_body_bytes`.
 fn default_max_body_bytes() -> usize {
     DEFAULT_MAX_BODY_BYTES
 }
 
 /// Normalizes Anthropic content block types for vLLM/Qwen compatibility.
 pub struct ContentNormalizeFilter {
+    /// Maximum request body size accepted by the filter.
     max_body_bytes: usize,
 }
 
@@ -96,6 +99,7 @@ impl ContentNormalizeFilter {
 
 /// Walks all messages and normalizes unsupported content block types.
 /// Returns `true` if any block was rewritten.
+#[expect(clippy::too_many_lines, reason = "sequential block-classify-rewrite pipeline")]
 fn normalize_messages(messages: &mut Vec<Value>) -> bool {
     let mut mutated = false;
     for msg in messages {
@@ -117,18 +121,18 @@ fn normalize_messages(messages: &mut Vec<Value>) -> bool {
                 "server_tool_use" => {
                     block_obj.insert("type".to_owned(), Value::String("tool_use".to_owned()));
                     mutated = true;
-                }
+                },
                 "server_tool_result" => {
                     block_obj.insert("type".to_owned(), Value::String("tool_result".to_owned()));
                     mutated = true;
-                }
+                },
                 "tool_result" => {
-                    if let Some(inner) = block_obj.get_mut("content") {
-                        if normalize_tool_result_content(inner) {
-                            mutated = true;
-                        }
+                    if let Some(inner) = block_obj.get_mut("content")
+                        && normalize_tool_result_content(inner)
+                    {
+                        mutated = true;
                     }
-                }
+                },
                 t if !VLLM_ACCEPTED_TYPES.contains(&t) => {
                     let original_type = t.to_owned();
                     let text = extract_text_from_block(block_obj, &original_type);
@@ -136,8 +140,8 @@ fn normalize_messages(messages: &mut Vec<Value>) -> bool {
                     block_obj.insert("type".to_owned(), Value::String("text".to_owned()));
                     block_obj.insert("text".to_owned(), Value::String(text));
                     mutated = true;
-                }
-                _ => {}
+                },
+                _ => {},
             }
         }
     }
@@ -200,10 +204,7 @@ impl HttpFilter for ContentNormalizeFilter {
         }
     }
 
-    async fn on_request(
-        &self,
-        _ctx: &mut HttpFilterContext<'_>,
-    ) -> Result<FilterAction, FilterError> {
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         Ok(FilterAction::Continue)
     }
 
