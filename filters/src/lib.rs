@@ -9,6 +9,7 @@
 //! inference routing, prompt enrichment, and token usage handling.
 
 pub mod agentic;
+pub mod api_key_auth;
 #[cfg(feature = "aws-sigv4-filter")]
 pub mod aws;
 #[cfg(feature = "azure-ad-filter")]
@@ -21,6 +22,7 @@ pub mod guardrails;
 mod identity_guard;
 pub mod inference;
 pub mod metering;
+pub mod model_access;
 #[cfg(feature = "opentelemetry")]
 mod opentelemetry;
 #[cfg(any(feature = "azure-ad-filter", feature = "gcp-adc-filter"))]
@@ -34,6 +36,7 @@ mod token_rate_limit;
 mod token_usage;
 
 pub use agentic::{a2a::A2aFilter, mcp::McpFilter};
+pub use api_key_auth::ApiKeyAuthFilter;
 #[cfg(feature = "aws-sigv4-filter")]
 pub use aws::Sigv4SignFilter;
 #[cfg(feature = "azure-ad-filter")]
@@ -46,6 +49,7 @@ pub use guardrails::AiGuardrailsFilter;
 pub use identity_guard::IdentityHeaderGuardFilter;
 pub use inference::{LlmisvcModelProviderResolverFilter, ModelToHeaderFilter};
 pub use metering::ExternalMeteringFilter;
+pub use model_access::ModelAccessFilter;
 pub use prompt_enrich::PromptEnrichFilter;
 pub use register::{build_ai_registry, install_pipeline_extensions, register_ai_filters};
 pub use routing::{CredentialInjectFilter, IntelligentRouteFilter, ProviderRouteFilter};
