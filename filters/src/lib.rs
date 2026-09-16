@@ -16,6 +16,7 @@ pub mod aws;
 pub mod azure;
 #[cfg(feature = "http-callout-filter")]
 pub mod callout;
+mod content_normalize;
 #[cfg(feature = "gcp-adc-filter")]
 pub mod gcp;
 pub mod guardrails;
@@ -44,6 +45,7 @@ pub use aws::Sigv4SignFilter;
 pub use azure::AzureAdFilter;
 #[cfg(feature = "http-callout-filter")]
 pub use callout::HttpCalloutFilter;
+pub use content_normalize::ContentNormalizeFilter;
 #[cfg(feature = "gcp-adc-filter")]
 pub use gcp::GcpAdcFilter;
 pub use guardrails::AiGuardrailsFilter;

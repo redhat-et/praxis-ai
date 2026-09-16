@@ -17,7 +17,8 @@ use crate::Sigv4SignFilter;
 #[cfg(feature = "token-rate-limit-filter")]
 use crate::TokenRateLimitFilter;
 use crate::{
-    A2aFilter, AiGuardrailsFilter, ApiKeyAuthFilter, CredentialInjectFilter, ExternalMeteringFilter,
+    A2aFilter, AiGuardrailsFilter, ApiKeyAuthFilter, ContentNormalizeFilter, CredentialInjectFilter,
+    ExternalMeteringFilter,
     IdentityHeaderGuardFilter, IntelligentRouteFilter, LlmisvcModelProviderResolverFilter, McpFilter, ModelAccessFilter,
     ModelCatalogFilter, ModelToHeaderFilter, PromptEnrichFilter, ProviderRouteFilter, TimeToFirstTokenFilter,
     TokenCountFilter, TokenUsageHeadersFilter,
@@ -146,6 +147,10 @@ fn register_general_ai_filters(registry: &mut FilterRegistry) {
     praxis_filter::register_filters!(
         @register registry,
         http "api_key_auth" => ApiKeyAuthFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
+        http "content_normalize" => ContentNormalizeFilter::from_config
     );
     praxis_filter::register_filters!(
         @register registry,
