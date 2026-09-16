@@ -67,6 +67,9 @@ const META_PREFIX: &str = "token_count.";
 /// Metadata key for the extraction mode (`sse` or `json`).
 const META_MODE: &str = "token_count.mode";
 
+/// Metadata key for the provider resolved per-response by `provider: auto`.
+const META_PROVIDER: &str = "token_count.provider";
+
 /// Metadata key for accumulated input tokens (streaming).
 const META_INPUT: &str = "token_count.input";
 
@@ -174,9 +177,73 @@ enum ProviderKind {
     BedrockInvokeModel,
     /// Azure OpenAI, which uses the OpenAI response schema.
     Azure,
+    /// Select the parser per request from the endpoint path.
+    ///
+    /// Routes that mix API dialects on one base URL (an Anthropic-dialect
+    /// route that also serves OpenAI Responses calls, for example) cannot
+    /// meter every dialect with a statically configured provider: usage
+    /// lives at different JSON paths per dialect, and the other dialects'
+    /// responses — streaming ones especially — silently meter as zero.
+    /// `auto` picks the parser for each request from the endpoint the
+    /// request targets instead.
+    Auto,
 }
 
 impl ProviderKind {
+    /// Resolve the response dialect from a request endpoint path.
+    ///
+    /// The endpoint determines the response format: `/v1/responses`
+    /// answers in Responses-API format even on a chain that otherwise
+    /// speaks Anthropic. `None` means the path has no meterable usage
+    /// format and extraction is skipped entirely.
+    ///
+    /// `/v1/messages/count_tokens` deliberately matches nothing: its
+    /// count is a tokenizer estimate for a request that never ran, and
+    /// metering it would double-count against the real call.
+    fn for_path(path: &str) -> Option<Self> {
+        if path.ends_with("/responses") || path.ends_with("/chat/completions") || path.ends_with("/completions") {
+            // Azure exposes OpenAI paths (`/openai/deployments/...`) with
+            // the OpenAI usage schema, so these paths meter as OpenAI too.
+            Some(Self::OpenAi)
+        } else if path.ends_with("/messages") {
+            Some(Self::Anthropic)
+        } else if path.ends_with(":generateContent") || path.ends_with(":streamGenerateContent") {
+            Some(Self::Google)
+        } else if path.ends_with("/converse") || path.ends_with("/converse-stream") {
+            Some(Self::Bedrock)
+        } else if path.ends_with("/invoke") || path.ends_with("/invoke-with-response-stream") {
+            Some(Self::BedrockInvokeModel)
+        } else {
+            None
+        }
+    }
+
+    /// Stable name for round-tripping through filter metadata.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::Anthropic => "anthropic",
+            Self::Google => "google",
+            Self::Bedrock => "bedrock",
+            Self::BedrockInvokeModel => "bedrock_invoke_model",
+            Self::Azure => "azure",
+            Self::Auto => "auto",
+        }
+    }
+
+    /// Inverse of [`Self::as_str`], for the value stashed by `Auto`.
+    fn from_meta(value: &str) -> Option<Self> {
+        match value {
+            "openai" => Some(Self::OpenAi),
+            "anthropic" => Some(Self::Anthropic),
+            "google" => Some(Self::Google),
+            "bedrock" => Some(Self::Bedrock),
+            "bedrock_invoke_model" => Some(Self::BedrockInvokeModel),
+            "azure" => Some(Self::Azure),
+            _ => None,
+        }
+    }
+
     /// Extract complete usage from a JSON response or final SSE payload.
     fn extract_token_usage(self, body: &[u8]) -> Option<TokenUsage> {
         match self {
@@ -184,7 +251,10 @@ impl ProviderKind {
             Self::Anthropic => parse_anthropic(body),
             Self::Google => parse_google(body),
             Self::Bedrock => parse_bedrock(body),
-            Self::BedrockInvokeModel => None,
+            // `Auto` and `BedrockInvokeModel` reach no body parser:
+            // `Auto` resolves to a concrete provider per request before
+            // extraction, and `BedrockInvokeModel` meters from headers.
+            Self::BedrockInvokeModel | Self::Auto => None,
         }
     }
 
@@ -193,7 +263,9 @@ impl ProviderKind {
         match self {
             Self::Anthropic => streaming::parse_anthropic_event(event_data),
             Self::Bedrock => streaming::parse_bedrock_event(event_data),
-            Self::OpenAi | Self::Azure | Self::Google | Self::BedrockInvokeModel => StreamingTokens::default(),
+            Self::OpenAi | Self::Azure | Self::Google | Self::BedrockInvokeModel | Self::Auto => {
+                StreamingTokens::default()
+            },
         }
     }
 }
@@ -209,11 +281,15 @@ impl ProviderKind {
 /// five providers (OpenAI, Anthropic, Google, Bedrock Converse, Azure), plus
 /// a header-only extraction path for Bedrock `InvokeModel`.
 ///
+/// `provider: auto` selects the dialect per request from the endpoint path,
+/// for routes that serve several API formats behind one base URL. Paths with
+/// no usage format (health checks, `/v1/models`, `count_tokens`) are skipped.
+///
 /// # YAML
 ///
 /// ```yaml
 /// filter: token_count
-/// provider: openai   # openai | anthropic | google | bedrock | bedrock_invoke_model | azure
+/// provider: openai   # openai | anthropic | google | bedrock | bedrock_invoke_model | azure | auto
 /// max_body_bytes: 1048576    # optional, JSON capture limit
 /// max_scratch_bytes: 1048576 # optional, SSE per-event capture limit; must fit
 ///                            # the largest usage event (Responses-API
@@ -263,6 +339,10 @@ fn validate_max_scratch_bytes(value: usize) -> Result<(), FilterError> {
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "per-provider guard clauses and tracing across the response hooks; async-trait desugaring counts toward the total"
+)]
 #[async_trait]
 impl HttpFilter for TokenCountFilter {
     fn name(&self) -> &'static str {
@@ -286,10 +366,12 @@ impl HttpFilter for TokenCountFilter {
     }
 
     /// Skips extraction entirely for non-success statuses, for every
-    /// provider. For `bedrock_invoke_model`, reads token counts directly
-    /// from response headers since that provider has no body format to
-    /// parse. For all other providers, detects the content-type to select
-    /// the body extraction strategy used by `on_response_body`.
+    /// provider. Resolves the parser first for `provider: auto`, from the
+    /// request path, and remembers it for `on_response_body`. For
+    /// `bedrock_invoke_model`, reads token counts directly from response
+    /// headers since that provider has no body format to parse. For all
+    /// other providers, detects the content-type to select the body
+    /// extraction strategy used by `on_response_body`.
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let is_success = ctx.response_header.as_ref().is_some_and(|r| r.status.is_success());
 
@@ -298,7 +380,21 @@ impl HttpFilter for TokenCountFilter {
             return Ok(FilterAction::Continue);
         }
 
-        if self.provider == ProviderKind::BedrockInvokeModel {
+        let provider = match self.provider {
+            ProviderKind::Auto => {
+                let Some(kind) = ProviderKind::for_path(ctx.request.uri.path()) else {
+                    trace!(
+                        path = ctx.request.uri.path(),
+                        "request path has no meterable usage format, skipping token extraction"
+                    );
+                    return Ok(FilterAction::Continue);
+                };
+                kind
+            },
+            other => other,
+        };
+
+        if provider == ProviderKind::BedrockInvokeModel {
             extract_bedrock_headers(ctx);
             return Ok(FilterAction::Continue);
         }
@@ -319,6 +415,21 @@ impl HttpFilter for TokenCountFilter {
         } else if is_json_content_type(ct) {
             ctx.filter_metadata.insert(META_MODE.to_owned(), "json".to_owned());
             trace!("content-type is JSON, will extract tokens from full body");
+        } else {
+            return Ok(FilterAction::Continue);
+        }
+
+        // Persist the resolved parser for `on_response_body`, which cannot
+        // see the request path itself. Stashed only once a mode exists, so
+        // responses that skip extraction leave no working state behind.
+        if self.provider == ProviderKind::Auto {
+            ctx.filter_metadata
+                .insert(META_PROVIDER.to_owned(), provider.as_str().to_owned());
+            debug!(
+                path = ctx.request.uri.path(),
+                provider = provider.as_str(),
+                "token_count auto: selected parser from request path"
+            );
         }
 
         Ok(FilterAction::Continue)
@@ -330,15 +441,27 @@ impl HttpFilter for TokenCountFilter {
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
-        if self.provider == ProviderKind::BedrockInvokeModel {
+        let provider = match self.provider {
+            ProviderKind::Auto => {
+                // Absent means this response was skipped by `on_response`
+                // (unmeterable path, non-success, or unparseable content).
+                match ctx.get_metadata(META_PROVIDER).and_then(ProviderKind::from_meta) {
+                    Some(kind) => kind,
+                    None => return Ok(FilterAction::Continue),
+                }
+            },
+            other => other,
+        };
+
+        if provider == ProviderKind::BedrockInvokeModel {
             return Ok(FilterAction::Continue);
         }
 
         let mode = ctx.get_metadata(META_MODE).map(str::to_owned);
 
         match mode.as_deref() {
-            Some("sse") => handle_sse_body(ctx, body, end_of_stream, self.provider, self.max_scratch_bytes),
-            Some("json") => handle_json_body(ctx, body, end_of_stream, self.provider, self.max_body_bytes),
+            Some("sse") => handle_sse_body(ctx, body, end_of_stream, provider, self.max_scratch_bytes),
+            Some("json") => handle_json_body(ctx, body, end_of_stream, provider, self.max_body_bytes),
             _ => {},
         }
 

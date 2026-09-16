@@ -30,6 +30,7 @@ fn from_config_all_providers() {
         "bedrock",
         "bedrock_invoke_model",
         "azure",
+        "auto",
     ] {
         let yaml = format!("provider: {provider}");
         let config: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
@@ -1149,6 +1150,199 @@ fn on_response_body_noop_for_bedrock_invoke_model() {
 }
 
 // -----------------------------------------------------------------------------
+// provider: auto — Dialect Resolution by Endpoint Path
+// -----------------------------------------------------------------------------
+
+#[test]
+fn for_path_resolves_openai_dialects() {
+    assert_eq!(
+        ProviderKind::for_path("/v1/responses"),
+        Some(ProviderKind::OpenAi),
+        "Responses endpoint meters with the OpenAI parser"
+    );
+    assert_eq!(
+        ProviderKind::for_path("/v1/chat/completions"),
+        Some(ProviderKind::OpenAi)
+    );
+    assert_eq!(ProviderKind::for_path("/v1/completions"), Some(ProviderKind::OpenAi));
+    assert_eq!(
+        ProviderKind::for_path("/openai/deployments/gpt/chat/completions"),
+        Some(ProviderKind::OpenAi),
+        "Azure OpenAI paths share the OpenAI schema"
+    );
+}
+
+#[test]
+fn for_path_resolves_vendor_dialects() {
+    assert_eq!(ProviderKind::for_path("/v1/messages"), Some(ProviderKind::Anthropic));
+    assert_eq!(
+        ProviderKind::for_path("/v1beta/models/gemini:generateContent"),
+        Some(ProviderKind::Google)
+    );
+    assert_eq!(
+        ProviderKind::for_path("/v1beta/models/gemini:streamGenerateContent"),
+        Some(ProviderKind::Google)
+    );
+    assert_eq!(
+        ProviderKind::for_path("/model/claude/converse"),
+        Some(ProviderKind::Bedrock)
+    );
+    assert_eq!(
+        ProviderKind::for_path("/model/claude/converse-stream"),
+        Some(ProviderKind::Bedrock)
+    );
+    assert_eq!(
+        ProviderKind::for_path("/model/titan/invoke"),
+        Some(ProviderKind::BedrockInvokeModel)
+    );
+    assert_eq!(
+        ProviderKind::for_path("/model/titan/invoke-with-response-stream"),
+        Some(ProviderKind::BedrockInvokeModel)
+    );
+}
+
+#[test]
+fn for_path_skips_unmeterable_paths() {
+    assert_eq!(ProviderKind::for_path("/v1/models"), None, "catalog has no usage");
+    assert_eq!(ProviderKind::for_path("/health"), None);
+    assert_eq!(
+        ProviderKind::for_path("/v1/messages/count_tokens"),
+        None,
+        "token estimates are not inference and must not meter"
+    );
+}
+
+#[test]
+fn provider_kind_meta_roundtrips() {
+    for kind in [
+        ProviderKind::OpenAi,
+        ProviderKind::Anthropic,
+        ProviderKind::Google,
+        ProviderKind::Bedrock,
+        ProviderKind::BedrockInvokeModel,
+        ProviderKind::Azure,
+    ] {
+        assert_eq!(
+            ProviderKind::from_meta(kind.as_str()),
+            Some(kind),
+            "resolved kinds must survive the metadata round-trip"
+        );
+    }
+    assert_eq!(
+        ProviderKind::from_meta("auto"),
+        None,
+        "auto never stashes itself as a resolved kind"
+    );
+}
+
+#[tokio::test]
+async fn auto_sse_responses_wrapper_metered() {
+    let events = concat!(
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":{\"text\":\"ok\"}}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":54,\"output_tokens\":9,\"total_tokens\":63}}}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    let (input, output, total) = run_sse_extraction_at(ProviderKind::Auto, "/v1/responses", events.as_bytes()).await;
+
+    assert_eq!(
+        input.as_deref(),
+        Some("54"),
+        "Responses-API SSE wrapper must meter via the OpenAI parser on a mixed route"
+    );
+    assert_eq!(output.as_deref(), Some("9"));
+    assert_eq!(total.as_deref(), Some("63"));
+}
+
+#[tokio::test]
+async fn auto_sse_messages_anthropic_partials_metered() {
+    let events = concat!(
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":25}}}\n\n",
+        "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":42}}\n\n",
+    );
+
+    let (input, output, total) = run_sse_extraction_at(ProviderKind::Auto, "/v1/messages", events.as_bytes()).await;
+
+    assert_eq!(
+        input.as_deref(),
+        Some("25"),
+        "/messages must meter through Anthropic partial accumulation"
+    );
+    assert_eq!(output.as_deref(), Some("42"));
+    assert_eq!(total.as_deref(), Some("67"));
+}
+
+#[tokio::test]
+async fn auto_json_responses_direct_metered_with_cache() {
+    let json = br#"{"id":"resp_abc","usage":{"input_tokens":1000,"output_tokens":50,"total_tokens":1050,"input_tokens_details":{"cached_tokens":900}}}"#;
+    let filter = make_filter(ProviderKind::Auto);
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let mut resp = make_response_with_content_type("application/json");
+    ctx.response_header = Some(&mut resp);
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+
+    let mut body = Some(Bytes::copy_from_slice(json));
+    drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+
+    assert_eq!(ctx.get_metadata("token.input"), Some("1000"));
+    assert_eq!(ctx.get_metadata("token.output"), Some("50"));
+    assert_eq!(
+        ctx.get_metadata("token.cache_read"),
+        Some("900"),
+        "cached_tokens must be attributed through the OpenAI parser"
+    );
+    assert_no_working_metadata(&ctx);
+}
+
+#[tokio::test]
+async fn auto_unmeterable_path_sets_nothing() {
+    let json = br#"{"input_tokens":123}"#;
+    let filter = make_filter(ProviderKind::Auto);
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/messages/count_tokens");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let mut resp = make_response_with_content_type("application/json");
+    ctx.response_header = Some(&mut resp);
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+
+    let mut body = Some(Bytes::copy_from_slice(json));
+    drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+
+    assert!(
+        ctx.get_metadata("token.input").is_none(),
+        "token-count estimates must not be metered as inference"
+    );
+    assert_no_working_metadata(&ctx);
+}
+
+#[tokio::test]
+async fn auto_bedrock_invoke_path_meters_headers() {
+    let filter = make_filter(ProviderKind::Auto);
+    let req = crate::test_utils::make_request(http::Method::POST, "/model/titan/invoke");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let mut resp = make_response_with_content_type("application/json");
+    resp.headers
+        .insert(HEADER_BEDROCK_INPUT, HeaderValue::from_static("25"));
+    resp.headers
+        .insert(HEADER_BEDROCK_OUTPUT, HeaderValue::from_static("50"));
+    ctx.response_header = Some(&mut resp);
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+
+    assert_eq!(
+        ctx.get_metadata("token.input"),
+        Some("25"),
+        "/invoke must resolve to the header-only provider"
+    );
+    assert_eq!(ctx.get_metadata("token.output"), Some("50"));
+}
+
+// -----------------------------------------------------------------------------
 // Prompt Cache Breakdown
 // -----------------------------------------------------------------------------
 
@@ -1741,8 +1935,19 @@ async fn run_sse_extraction(
     provider: ProviderKind,
     sse_bytes: &[u8],
 ) -> (Option<String>, Option<String>, Option<String>) {
+    run_sse_extraction_at(provider, "/v1/chat/completions", sse_bytes).await
+}
+
+/// Run a full `on_response` -> `on_response_body` SSE cycle against a
+/// specific request path, which is what `provider: auto` resolves its
+/// parser from.
+async fn run_sse_extraction_at(
+    provider: ProviderKind,
+    path: &str,
+    sse_bytes: &[u8],
+) -> (Option<String>, Option<String>, Option<String>) {
     let filter = make_filter(provider);
-    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let req = crate::test_utils::make_request(http::Method::POST, path);
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
     let mut resp = make_response_with_content_type("text/event-stream");
