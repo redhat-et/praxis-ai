@@ -18,12 +18,7 @@ async fn run(filter: &dyn HttpFilter, json: &serde_json::Value) -> (serde_json::
     let original_len = raw.len();
     let mut body = Some(Bytes::from(raw));
 
-    drop(
-        filter
-            .on_request_body(&mut ctx, &mut body, true)
-            .await
-            .unwrap(),
-    );
+    drop(filter.on_request_body(&mut ctx, &mut body, true).await.unwrap());
 
     let result: serde_json::Value = serde_json::from_slice(body.as_ref().unwrap()).unwrap();
     let mutated = body.as_ref().unwrap().len() != original_len
@@ -153,10 +148,7 @@ async fn noop_on_non_json() {
     let mut ctx = crate::test_utils::make_filter_context(&req);
     let mut body = Some(Bytes::from_static(b"not json"));
 
-    let action = filter
-        .on_request_body(&mut ctx, &mut body, true)
-        .await
-        .unwrap();
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
     assert!(matches!(action, FilterAction::Continue));
     assert_eq!(body.as_ref().unwrap().as_ref(), b"not json");
@@ -172,10 +164,7 @@ async fn noop_before_end_of_stream() {
     ]});
     let mut body = Some(Bytes::from(serde_json::to_vec(&input).unwrap()));
 
-    let action = filter
-        .on_request_body(&mut ctx, &mut body, false)
-        .await
-        .unwrap();
+    let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
 
     assert!(matches!(action, FilterAction::Continue));
 }

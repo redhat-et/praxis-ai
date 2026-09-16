@@ -3,6 +3,8 @@
 
 //! Unit tests for the model access filter.
 
+use std::fmt::Write as _;
+
 use bytes::Bytes;
 use http::Method;
 use praxis_filter::FilterAction;
@@ -249,9 +251,11 @@ fn make_filter_with_overrides(
         .join("\n");
     let mut yaml_str = format!("mode: {mode}\nmodels:\n{models_yaml}\noverrides:\n");
     for (group, omode, omodels) in overrides {
-        yaml_str.push_str(&format!("  - groups: [\"{group}\"]\n    mode: {omode}\n    models:\n"));
+        _ = writeln!(yaml_str, "  - groups: [\"{group}\"]");
+        _ = writeln!(yaml_str, "    mode: {omode}");
+        _ = writeln!(yaml_str, "    models:");
         for m in *omodels {
-            yaml_str.push_str(&format!("      - \"{m}\"\n"));
+            _ = writeln!(yaml_str, "      - \"{m}\"");
         }
     }
     let yaml: serde_yaml::Value = serde_yaml::from_str(&yaml_str).unwrap();
@@ -259,10 +263,7 @@ fn make_filter_with_overrides(
 }
 
 async fn run_with_model(filter: &dyn praxis_filter::HttpFilter, model: &str, group: Option<&str>) -> FilterAction {
-    let body = format!(
-        r#"{{"model":"{}","messages":[{{"role":"user","content":"hi"}}]}}"#,
-        model
-    );
+    let body = format!(r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}]}}"#);
     run_with_body(filter, body.as_bytes(), group).await
 }
 

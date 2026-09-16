@@ -145,6 +145,7 @@ fn register_vertex_filters(registry: &mut FilterRegistry) {
 }
 
 /// Register general-purpose AI filters.
+#[expect(clippy::too_many_lines, reason = "long flat registration list")]
 fn register_general_ai_filters(registry: &mut FilterRegistry) {
     register_state_owner(registry);
     register_project_state_owner_headers(registry);
