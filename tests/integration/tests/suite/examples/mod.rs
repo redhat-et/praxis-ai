@@ -44,6 +44,7 @@ mod lakera_guard;
 mod llmd_ext_proc;
 mod llmisvc_model_provider_resolver;
 mod mcp_broker;
+mod model_catalog;
 mod model_to_header;
 #[cfg(feature = "store-sqlite")]
 mod openai_agentic_loop;

@@ -1,0 +1,50 @@
+# Model Catalog
+#
+# Answers GET /v1/models from static configuration instead of
+# forwarding it upstream. A multi-provider gateway fronts models from
+# several backends (and local models that have no upstream /v1/models),
+# so no single backend can enumerate what the gateway exposes. This
+# filter serves that list itself as a terminal response.
+#
+# Usage:
+#   cargo run -p praxis-ai-proxy -- -c examples/configs/model-catalog.yaml
+#
+# List models:
+#   curl http://localhost:8080/v1/models
+#
+# This filter handles discovery only: it advertises what the gateway
+# exposes. Authorization -- deciding who may call a model -- stays with
+# the model_access filter; the catalog does not re-declare access rules.
+#
+# Requests other than GET /v1/models pass through untouched.
+
+listeners:
+  - name: gateway
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - catalog
+
+filter_chains:
+  - name: catalog
+    filters:
+      - filter: model_catalog
+        format: openai
+        path: /v1/models
+        models:
+          - id: llama-3.1-8b-instruct
+            owned_by: praxis
+          - id: mistral-7b-instruct
+            owned_by: praxis
+          - id: claude-internal
+            display_name: "Claude (internal)"
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"

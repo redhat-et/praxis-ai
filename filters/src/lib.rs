@@ -23,6 +23,7 @@ mod identity_guard;
 pub mod inference;
 pub mod metering;
 pub mod model_access;
+pub mod model_catalog;
 #[cfg(feature = "opentelemetry")]
 mod opentelemetry;
 #[cfg(any(feature = "azure-ad-filter", feature = "gcp-adc-filter"))]
@@ -50,6 +51,7 @@ pub use identity_guard::IdentityHeaderGuardFilter;
 pub use inference::{LlmisvcModelProviderResolverFilter, ModelToHeaderFilter};
 pub use metering::ExternalMeteringFilter;
 pub use model_access::ModelAccessFilter;
+pub use model_catalog::ModelCatalogFilter;
 pub use prompt_enrich::PromptEnrichFilter;
 pub use register::{build_ai_registry, install_pipeline_extensions, register_ai_filters};
 pub use routing::{CredentialInjectFilter, IntelligentRouteFilter, ProviderRouteFilter};
