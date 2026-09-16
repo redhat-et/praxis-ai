@@ -23,8 +23,8 @@ use crate::TokenRateLimitFilter;
 use crate::{
     A2aFilter, AiGuardrailsFilter, ApiKeyAuthFilter, CredentialInjectFilter, ExternalMeteringFilter,
     IdentityHeaderGuardFilter, IntelligentRouteFilter, LlmisvcModelProviderResolverFilter, McpFilter, ModelAccessFilter,
-    ModelToHeaderFilter, PromptEnrichFilter, ProviderRouteFilter, TimeToFirstTokenFilter, TokenCountFilter,
-    TokenUsageHeadersFilter,
+    ModelCatalogFilter, ModelToHeaderFilter, PromptEnrichFilter, ProviderRouteFilter, TimeToFirstTokenFilter,
+    TokenCountFilter, TokenUsageHeadersFilter,
 };
 
 /// Register all in-tree AI HTTP filters into `registry`.
@@ -209,6 +209,10 @@ fn register_general_ai_filters(registry: &mut FilterRegistry) {
     praxis_filter::register_filters!(
         @register registry,
         http "model_access" => ModelAccessFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
+        http "model_catalog" => ModelCatalogFilter::from_config
     );
     praxis_filter::register_filters!(
         @register registry,
