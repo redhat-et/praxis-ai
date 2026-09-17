@@ -20,8 +20,7 @@ async fn run(filter: &dyn HttpFilter, json: &serde_json::Value) -> (serde_json::
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     let mutated = matches!(action, FilterAction::Continue);
 
-    let result: serde_json::Value =
-        serde_json::from_slice(body.as_ref().unwrap()).unwrap();
+    let result: serde_json::Value = serde_json::from_slice(body.as_ref().unwrap()).unwrap();
     (result, mutated)
 }
 
@@ -128,10 +127,7 @@ async fn gracefully_handles_non_json() {
     let mut ctx = crate::test_utils::make_filter_context(&req);
     let mut body = Some(Bytes::from_static(b"not json at all"));
 
-    let action = filter
-        .on_request_body(&mut ctx, &mut body, true)
-        .await
-        .unwrap();
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
     assert!(
         matches!(action, FilterAction::Continue),
@@ -152,10 +148,7 @@ async fn noop_before_end_of_stream() {
     let input = json!({"model": "gpt-5.4", "stream": true});
     let mut body = Some(Bytes::from(serde_json::to_vec(&input).unwrap()));
 
-    let action = filter
-        .on_request_body(&mut ctx, &mut body, false)
-        .await
-        .unwrap();
+    let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
 
     assert!(
         matches!(action, FilterAction::Continue),
@@ -171,14 +164,10 @@ async fn noop_on_responses_api() {
     let input = serde_json::json!({"model": "gpt-4.1", "stream": true, "input": "hi"});
     let mut body = Some(Bytes::from(serde_json::to_vec(&input).unwrap()));
 
-    let action = filter
-        .on_request_body(&mut ctx, &mut body, true)
-        .await
-        .unwrap();
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
     assert!(matches!(action, FilterAction::Continue));
-    let result: serde_json::Value =
-        serde_json::from_slice(body.as_ref().unwrap()).unwrap();
+    let result: serde_json::Value = serde_json::from_slice(body.as_ref().unwrap()).unwrap();
     assert!(
         result.get("stream_options").is_none(),
         "should NOT inject stream_options on /v1/responses"

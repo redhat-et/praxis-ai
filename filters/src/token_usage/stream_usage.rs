@@ -34,8 +34,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use praxis_ai_apis::json_body::replace_json_body;
 use praxis_filter::{
-    BodyAccess, BodyMode, FilterAction, FilterError, HttpFilter, HttpFilterContext,
-    parse_filter_config,
+    BodyAccess, BodyMode, FilterAction, FilterError, HttpFilter, HttpFilterContext, parse_filter_config,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -53,10 +52,7 @@ fn is_chat_completions(ctx: &HttpFilterContext<'_>) -> bool {
 /// Returns `true` when the body is a streaming request without `include_usage`.
 fn needs_injection(value: &Value) -> bool {
     value.get("stream") == Some(&Value::Bool(true))
-        && value
-            .get("stream_options")
-            .and_then(|so| so.get("include_usage"))
-            != Some(&Value::Bool(true))
+        && value.get("stream_options").and_then(|so| so.get("include_usage")) != Some(&Value::Bool(true))
 }
 
 /// Sets `stream_options.include_usage = true`, creating the object if needed.
@@ -129,10 +125,7 @@ impl HttpFilter for StreamUsageInjectFilter {
         }
     }
 
-    async fn on_request(
-        &self,
-        _ctx: &mut HttpFilterContext<'_>,
-    ) -> Result<FilterAction, FilterError> {
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         Ok(FilterAction::Continue)
     }
 
