@@ -1,0 +1,44 @@
+# Stream Usage Injection
+#
+# Ensures every streaming OpenAI Chat Completions request carries
+# stream_options.include_usage = true so the upstream response includes
+# token usage in the final SSE event.
+#
+# Without this opt-in, OpenAI streams carry no usage object and the
+# gateway meters a legitimate 0 — the client is responsible for
+# requesting it, but a metering gateway cannot rely on client behavior.
+#
+# Usage:
+#   cargo run -p praxis-ai-proxy -- -c examples/configs/stream-usage-inject.yaml
+#   curl http://localhost:8080/v1/chat/completions \
+#     -d '{"model":"gpt-4","stream":true,"messages":[{"role":"user","content":"hi"}]}'
+#
+# The filter is a no-op for non-streaming requests, requests that
+# already carry the opt-in, and non-JSON bodies.
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: stream_usage_inject
+
+      - filter: token_count
+        provider: openai
+
+      - filter: token_usage_headers
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
