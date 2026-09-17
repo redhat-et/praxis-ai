@@ -19,8 +19,8 @@ mod streaming;
 pub use ceiling::TokenCeilingFilter;
 pub use count::TokenCountFilter;
 pub use headers::TokenUsageHeadersFilter;
-use praxis_filter::HttpFilterContext;
 pub use stream_usage::StreamUsageInjectFilter;
+use praxis_filter::HttpFilterContext;
 
 /// Metadata key for the input token count.
 ///
