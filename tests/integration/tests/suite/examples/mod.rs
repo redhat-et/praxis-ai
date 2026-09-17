@@ -90,6 +90,7 @@ mod responses_to_chat_completions;
 mod responses_to_chat_completions_conformance;
 #[cfg(feature = "store-sqlite")]
 mod session_replay;
+mod stream_usage_inject;
 mod time_to_first_token;
 mod token_count;
 mod token_counting;
