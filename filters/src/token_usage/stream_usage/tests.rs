@@ -11,17 +11,29 @@ fn make_filter() -> Box<dyn HttpFilter> {
     StreamUsageInjectFilter::from_config(&serde_yaml::Value::Null).unwrap()
 }
 
-async fn run(filter: &dyn HttpFilter, json: &serde_json::Value) -> (serde_json::Value, bool) {
-    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+async fn run(filter: &dyn HttpFilter, json: &serde_json::Value) -> serde_json::Value {
+    run_at_path(filter, "/v1/chat/completions", json).await
+}
+
+async fn run_at_path(filter: &dyn HttpFilter, path: &str, json: &serde_json::Value) -> serde_json::Value {
+    let body = run_raw_at_path(filter, path, serde_json::to_vec(json).unwrap().into()).await;
+    serde_json::from_slice(body.as_ref().unwrap()).unwrap()
+}
+
+/// Runs the filter over raw body bytes and returns them, so tests can
+/// assert byte-for-byte pass-through when that is the contract.
+async fn run_raw_at_path(filter: &dyn HttpFilter, path: &str, raw: Bytes) -> Option<Bytes> {
+    let req = crate::test_utils::make_request(http::Method::POST, path);
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    let raw = serde_json::to_vec(json).unwrap();
-    let mut body = Some(Bytes::from(raw));
+    let mut body = Some(raw);
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
-    let mutated = matches!(action, FilterAction::Continue);
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "filter should always continue"
+    );
 
-    let result: serde_json::Value = serde_json::from_slice(body.as_ref().unwrap()).unwrap();
-    (result, mutated)
+    body
 }
 
 #[tokio::test]
@@ -33,7 +45,7 @@ async fn injects_when_streaming_without_stream_options() {
         "messages": [{"role": "user", "content": "hi"}]
     });
 
-    let (result, _) = run(&*filter, &input).await;
+    let result = run(&*filter, &input).await;
 
     assert_eq!(
         result["stream_options"]["include_usage"],
@@ -54,7 +66,7 @@ async fn noop_when_already_present() {
         "messages": [{"role": "user", "content": "hi"}]
     });
 
-    let (result, _) = run(&*filter, &input).await;
+    let result = run(&*filter, &input).await;
 
     assert_eq!(
         result["stream_options"]["include_usage"],
@@ -72,7 +84,7 @@ async fn noop_when_not_streaming() {
         "messages": [{"role": "user", "content": "hi"}]
     });
 
-    let (result, _) = run(&*filter, &input).await;
+    let result = run(&*filter, &input).await;
 
     assert!(
         result.get("stream_options").is_none(),
@@ -88,7 +100,7 @@ async fn noop_when_stream_absent() {
         "messages": [{"role": "user", "content": "hi"}]
     });
 
-    let (result, _) = run(&*filter, &input).await;
+    let result = run(&*filter, &input).await;
 
     assert!(
         result.get("stream_options").is_none(),
@@ -106,7 +118,7 @@ async fn preserves_existing_stream_options_fields() {
         "messages": [{"role": "user", "content": "hi"}]
     });
 
-    let (result, _) = run(&*filter, &input).await;
+    let result = run(&*filter, &input).await;
 
     assert_eq!(
         result["stream_options"]["include_usage"],
@@ -159,25 +171,163 @@ async fn noop_before_end_of_stream() {
 #[tokio::test]
 async fn noop_on_responses_api() {
     let filter = make_filter();
-    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let input = json!({"model": "gpt-4.1", "stream": true, "input": "hi"});
+    let raw = serde_json::to_vec(&input).unwrap();
+
+    let body = run_raw_at_path(&*filter, "/v1/responses", Bytes::from(raw.clone())).await;
+
+    assert_eq!(
+        body.as_ref().unwrap().as_ref(),
+        raw.as_slice(),
+        "body should be passed through byte-for-byte on /v1/responses"
+    );
+}
+
+#[tokio::test]
+async fn injects_on_trailing_slash_path() {
+    let filter = make_filter();
+    let input = json!({"model": "gpt-5.4", "stream": true, "messages": []});
+
+    let result = run_at_path(&*filter, "/v1/chat/completions/", &input).await;
+
+    assert_eq!(
+        result["stream_options"]["include_usage"],
+        json!(true),
+        "trailing slash must not bypass injection"
+    );
+}
+
+#[tokio::test]
+async fn injects_with_query_string() {
+    let filter = make_filter();
+    let input = json!({"model": "gpt-5.4", "stream": true, "messages": []});
+
+    let result = run_at_path(&*filter, "/v1/chat/completions?api-version=2024-10-21", &input).await;
+
+    assert_eq!(
+        result["stream_options"]["include_usage"],
+        json!(true),
+        "query string must not bypass injection"
+    );
+}
+
+#[tokio::test]
+async fn injects_when_stream_options_null() {
+    let filter = make_filter();
+    let input = json!({"model": "gpt-5.4", "stream": true, "stream_options": null});
+
+    let result = run(&*filter, &input).await;
+
+    assert_eq!(
+        result["stream_options"]["include_usage"],
+        json!(true),
+        "null stream_options should be treated as absent and replaced with the opt-in"
+    );
+}
+
+#[tokio::test]
+async fn noop_when_stream_options_not_object() {
+    let filter = make_filter();
+    let input = json!({"model": "gpt-5.4", "stream": true, "stream_options": "yes"});
+    let raw = serde_json::to_vec(&input).unwrap();
+
+    let body = run_raw_at_path(&*filter, "/v1/chat/completions", Bytes::from(raw.clone())).await;
+
+    assert_eq!(
+        body.as_ref().unwrap().as_ref(),
+        raw.as_slice(),
+        "provider-invalid stream_options should pass through untouched for upstream validation"
+    );
+}
+
+#[tokio::test]
+async fn noop_on_non_object_json_body() {
+    let filter = make_filter();
+    let raw = br#"[{"stream":true}]"#;
+
+    let body = run_raw_at_path(&*filter, "/v1/chat/completions", Bytes::from_static(raw)).await;
+
+    assert_eq!(
+        body.as_ref().unwrap().as_ref(),
+        raw,
+        "non-object JSON body should pass through byte-for-byte"
+    );
+}
+
+#[tokio::test]
+async fn noop_on_absent_body() {
+    let filter = make_filter();
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    let input = serde_json::json!({"model": "gpt-4.1", "stream": true, "input": "hi"});
-    let mut body = Some(Bytes::from(serde_json::to_vec(&input).unwrap()));
+    let mut body: Option<Bytes> = None;
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Continue));
-    let result: serde_json::Value = serde_json::from_slice(body.as_ref().unwrap()).unwrap();
     assert!(
-        result.get("stream_options").is_none(),
-        "should NOT inject stream_options on /v1/responses"
+        matches!(action, FilterAction::Continue),
+        "should continue when no body is buffered"
+    );
+    assert!(body.is_none(), "no body should be synthesized");
+}
+
+#[tokio::test]
+async fn noop_on_unrelated_path() {
+    let filter = make_filter();
+    let input = json!({"stream": true, "something": "else"});
+    let raw = serde_json::to_vec(&input).unwrap();
+
+    let body = run_raw_at_path(&*filter, "/v1/embeddings", Bytes::from(raw.clone())).await;
+
+    assert_eq!(
+        body.as_ref().unwrap().as_ref(),
+        raw.as_slice(),
+        "requests to unrelated endpoints should pass through byte-for-byte"
     );
 }
 
 #[test]
 fn filter_name() {
     let filter = make_filter();
-    assert_eq!(filter.name(), "stream_usage_inject");
+    assert_eq!(
+        filter.name(),
+        "stream_usage_inject",
+        "filter should register under its config name"
+    );
+}
+
+#[test]
+fn zero_max_body_bytes_rejected() {
+    let config = serde_yaml::from_str::<serde_yaml::Value>("max_body_bytes: 0").unwrap();
+
+    let result = StreamUsageInjectFilter::from_config(&config);
+
+    assert!(result.is_err(), "zero max_body_bytes should be rejected at config time");
+}
+
+#[test]
+fn oversized_max_body_bytes_rejected() {
+    let config = serde_yaml::from_str::<serde_yaml::Value>("max_body_bytes: 67108865").unwrap();
+
+    let result = StreamUsageInjectFilter::from_config(&config);
+
+    assert!(
+        result.is_err(),
+        "max_body_bytes above the 64 MiB ceiling should be rejected at config time"
+    );
+}
+
+#[test]
+fn configured_max_body_bytes_applied() {
+    let config = serde_yaml::from_str::<serde_yaml::Value>("max_body_bytes: 4096").unwrap();
+    let filter = StreamUsageInjectFilter::from_config(&config).unwrap();
+
+    assert!(
+        matches!(
+            filter.request_body_mode(),
+            praxis_filter::BodyMode::StreamBuffer { max_bytes: Some(4096) }
+        ),
+        "configured max_body_bytes should flow into the body mode"
+    );
 }
 
 #[test]

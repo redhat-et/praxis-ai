@@ -9,7 +9,7 @@ Injects `stream_options.include_usage = true` into streaming OpenAI chat-complet
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
-| `max_body_bytes` | integer | no | Maximum request body bytes for `StreamBuffer` mode. |
+| `max_body_bytes` | integer | no | Maximum request body bytes for `StreamBuffer` mode. The cap applies to every request traversing the chain, not only streaming chat completions. |
 
 ## Example
 

@@ -6,8 +6,9 @@
 //! Proves the example chain end-to-end: a streaming Chat Completions
 //! request that omits `stream_options` is rewritten in transit so the
 //! upstream sees `stream_options.include_usage = true` and answers with
-//! a final usage chunk that reaches the client intact. Non-streaming
-//! requests pass through untouched.
+//! a final usage chunk that reaches the client intact — including when
+//! the path carries a trailing slash. Non-streaming requests and
+//! requests to unrelated endpoints pass through untouched.
 
 use std::collections::HashMap;
 
@@ -82,6 +83,70 @@ fn streaming_request_reaches_upstream_with_include_usage() {
         "downstream response should carry the usage chunk: {}",
         parse_body(&raw)
     );
+}
+
+/// The same streaming request aimed at `/v1/chat/completions/` (with a
+/// trailing slash) is still rewritten: path matching tolerates the slash,
+/// so a client cannot bypass the usage opt-in — and the metering gap it
+/// would open — by appending one.
+#[test]
+fn trailing_slash_path_still_receives_include_usage() {
+    let backend = StatefulCapturingBackend::new(vec![(200, SSE_BODY.to_owned())]).start_with_shutdown();
+    let proxy_port = free_port();
+    let config = load_example_config(
+        "stream-usage-inject.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3000", backend.port())]),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &json_post(
+            "/v1/chat/completions/",
+            r#"{"model":"gpt-4","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+        ),
+    );
+    assert_eq!(parse_status(&raw), 200, "trailing-slash streaming request should return 200");
+
+    let requests: Vec<CapturedRequest> = backend
+        .requests()
+        .into_iter()
+        .filter(|r| r.method == "POST" && r.uri == "/v1/chat/completions/")
+        .collect();
+    assert_eq!(requests.len(), 1, "backend should see exactly one chat request");
+    assert!(
+        requests[0].body.contains(r#""include_usage":true"#),
+        "trailing slash must not bypass the injected usage opt-in: {}",
+        requests[0].body
+    );
+}
+
+/// A request to an unrelated endpoint is a no-op for the filter: the
+/// upstream sees the body exactly as the client sent it, even though it
+/// carries `stream: true`.
+#[test]
+fn unrelated_path_passes_through_unchanged() {
+    let backend = StatefulCapturingBackend::new(vec![(200, JSON_BODY.to_owned())]).start_with_shutdown();
+    let proxy_port = free_port();
+    let config = load_example_config(
+        "stream-usage-inject.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3000", backend.port())]),
+    );
+    let proxy = start_proxy(&config);
+
+    let body = r#"{"model":"text-embedding-3-small","input":"hi","stream":true}"#;
+    let raw = http_send(proxy.addr(), &json_post("/v1/embeddings", body));
+    assert_eq!(parse_status(&raw), 200, "embeddings request should return 200");
+
+    let requests: Vec<CapturedRequest> = backend
+        .requests()
+        .into_iter()
+        .filter(|r| r.method == "POST" && r.uri == "/v1/embeddings")
+        .collect();
+    assert_eq!(requests.len(), 1, "backend should see exactly one embeddings request");
+    assert_eq!(requests[0].body, body, "unrelated-path request body should be untouched");
 }
 
 /// A non-streaming request is a no-op for the filter: the upstream sees
