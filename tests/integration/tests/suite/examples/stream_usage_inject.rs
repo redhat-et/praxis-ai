@@ -107,7 +107,11 @@ fn trailing_slash_path_still_receives_include_usage() {
             r#"{"model":"gpt-4","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
         ),
     );
-    assert_eq!(parse_status(&raw), 200, "trailing-slash streaming request should return 200");
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "trailing-slash streaming request should return 200"
+    );
 
     let requests: Vec<CapturedRequest> = backend
         .requests()
@@ -146,7 +150,10 @@ fn unrelated_path_passes_through_unchanged() {
         .filter(|r| r.method == "POST" && r.uri == "/v1/embeddings")
         .collect();
     assert_eq!(requests.len(), 1, "backend should see exactly one embeddings request");
-    assert_eq!(requests[0].body, body, "unrelated-path request body should be untouched");
+    assert_eq!(
+        requests[0].body, body,
+        "unrelated-path request body should be untouched"
+    );
 }
 
 /// A non-streaming request is a no-op for the filter: the upstream sees
