@@ -199,11 +199,18 @@ fn register_general_ai_filters(registry: &mut FilterRegistry) {
 
 /// Register the reject-upgrade filter, which refuses connection upgrades
 /// (e.g. `WebSocket`) so upgraded tunnels cannot bypass body-level metering.
+///
+/// Registered as security-critical: it guards quota/billing integrity, the
+/// same family as `api_key_auth`.
+#[expect(clippy::panic, reason = "duplicate filter registration is a fatal configuration bug")]
 fn register_reject_upgrade(registry: &mut FilterRegistry) {
-    praxis_filter::register_filters!(
-        @register registry,
-        http "reject_upgrade" => RejectUpgradeFilter::from_config
-    );
+    registry
+        .register_with_class(
+            "reject_upgrade",
+            praxis_filter::FilterFactory::Http(std::sync::Arc::new(RejectUpgradeFilter::from_config)),
+            praxis_filter::SecurityClass::Security,
+        )
+        .unwrap_or_else(|_| panic!("duplicate filter name: 'reject_upgrade'"));
 }
 
 /// Register token counting/usage/rate-limiting filters.
@@ -814,6 +821,7 @@ provider:
         #[cfg(feature = "aws-sigv4-filter")]
         assert!(registry.is_security_filter("aws_sigv4_sign"));
         assert!(registry.is_security_filter("callout_credentials"));
+        assert!(registry.is_security_filter("reject_upgrade"));
         #[cfg(feature = "azure-ad-filter")]
         assert!(registry.is_security_filter("azure_ad"));
         #[cfg(feature = "gcp-adc-filter")]
