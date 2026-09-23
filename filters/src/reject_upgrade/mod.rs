@@ -26,11 +26,17 @@ mod tests;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use http::header::UPGRADE;
+use http::header::{CONTENT_TYPE, UPGRADE};
 use praxis_filter::{FilterAction, FilterError, HttpFilter, HttpFilterContext, Rejection, parse_filter_config};
 use tracing::debug;
 
 use self::config::{RejectUpgradeConfig, validate_config};
+
+/// Error `type` reported in the rejection body (OpenAI error envelope).
+const ERROR_TYPE: &str = "invalid_request_error";
+
+/// Error `code` reported in the rejection body.
+const ERROR_CODE: &str = "upgrade_not_supported";
 
 // -----------------------------------------------------------------------------
 // RejectUpgradeFilter
@@ -66,8 +72,9 @@ pub struct RejectUpgradeFilter {
     /// Lowercased upgrade tokens to reject; empty means reject any upgrade.
     protocols: Vec<String>,
 
-    /// Rejection response body.
-    message: Bytes,
+    /// Rejection response body: an OpenAI-shaped JSON error envelope, built
+    /// once at construction so clients log a literate error, not HTML.
+    body: Bytes,
 }
 
 impl RejectUpgradeFilter {
@@ -80,10 +87,21 @@ impl RejectUpgradeFilter {
         let config: RejectUpgradeConfig = parse_filter_config("reject_upgrade", value)?;
         validate_config(&config).map_err(|e| -> FilterError { e.into() })?;
 
+        // Serialize an OpenAI-shaped error envelope so upstream clients (which
+        // expect provider-style JSON) log a literate message instead of HTML.
+        let body = serde_json::to_vec(&serde_json::json!({
+            "error": {
+                "message": config.message,
+                "type": ERROR_TYPE,
+                "code": ERROR_CODE,
+            }
+        }))
+        .map_err(|e| -> FilterError { format!("reject_upgrade: failed to serialize error body: {e}").into() })?;
+
         Ok(Box::new(Self {
             status: config.status,
             protocols: config.protocols.iter().map(|p| p.trim().to_ascii_lowercase()).collect(),
-            message: Bytes::from(config.message.into_bytes()),
+            body: Bytes::from(body),
         }))
     }
 
@@ -130,7 +148,9 @@ impl HttpFilter for RejectUpgradeFilter {
             // correct here: the client sent an upgrade handshake, not a normal
             // request, so the connection must not be reused.
             return Ok(FilterAction::Reject(
-                Rejection::status(self.status).with_body(self.message.clone()),
+                Rejection::status(self.status)
+                    .with_header(CONTENT_TYPE.as_str(), "application/json")
+                    .with_body(self.body.clone()),
             ));
         }
         Ok(FilterAction::Continue)
