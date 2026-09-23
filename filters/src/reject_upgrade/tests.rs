@@ -104,6 +104,34 @@ async fn rejects_websocket_upgrade_by_default() {
 }
 
 #[tokio::test]
+async fn rejection_body_is_openai_shaped_json() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(r#"message: "no websockets here""#).unwrap();
+    let filter = RejectUpgradeFilter::from_config(&yaml).unwrap();
+
+    let mut req = make_request(Method::GET, "/v1/responses");
+    req.headers.insert(UPGRADE, HeaderValue::from_static("websocket"));
+
+    let mut ctx = make_filter_context(&req);
+    let action = filter.on_request(&mut ctx).await.unwrap();
+
+    let FilterAction::Reject(rejection) = action else {
+        panic!("expected a rejection");
+    };
+    assert!(
+        rejection
+            .headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("content-type") && v == "application/json"),
+        "rejection must declare a JSON content-type"
+    );
+    let body = rejection.body.expect("rejection must carry a body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body must be valid JSON");
+    assert_eq!(json["error"]["message"], "no websockets here");
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["code"], "upgrade_not_supported");
+}
+
+#[tokio::test]
 async fn rejects_any_upgrade_when_no_protocol_list() {
     let yaml: serde_yaml::Value = serde_yaml::from_str("{}").unwrap();
     let filter = RejectUpgradeFilter::from_config(&yaml).unwrap();
