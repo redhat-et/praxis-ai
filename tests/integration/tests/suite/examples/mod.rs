@@ -81,6 +81,7 @@ mod openai_tool_parse;
 mod project_state_owner_headers;
 mod prompt_enrichment;
 mod provider_route;
+mod reject_upgrade;
 #[cfg(feature = "store-sqlite")]
 mod rehydrate;
 mod responses_routing;
