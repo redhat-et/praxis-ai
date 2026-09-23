@@ -36,7 +36,8 @@ pub(super) struct RejectUpgradeConfig {
     #[serde(default)]
     pub protocols: Vec<String>,
 
-    /// Response body returned with the rejection.
+    /// Human-readable message embedded in the OpenAI-shaped JSON error body
+    /// returned with the rejection.
     #[serde(default = "default_message")]
     pub message: String,
 }
