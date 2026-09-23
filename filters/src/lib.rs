@@ -30,6 +30,7 @@ mod opentelemetry;
 pub mod prompt_enrich;
 mod reasoning_effort_map;
 mod register;
+mod reject_upgrade;
 pub mod routing;
 #[cfg(feature = "store")]
 mod store_readiness;
@@ -58,6 +59,7 @@ pub use model_catalog::ModelCatalogFilter;
 pub use prompt_enrich::PromptEnrichFilter;
 pub use reasoning_effort_map::ReasoningEffortMapFilter;
 pub use register::{build_ai_registry, install_pipeline_extensions, register_ai_filters};
+pub use reject_upgrade::RejectUpgradeFilter;
 pub use routing::{CredentialInjectFilter, IntelligentRouteFilter, ProviderRouteFilter};
 #[cfg(feature = "store")]
 pub use store_readiness::{FILTER_NAME as STORE_READINESS_GATE_FILTER_NAME, StoreReadinessGateFilter};
