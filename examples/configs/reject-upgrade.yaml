@@ -1,0 +1,45 @@
+# Reject Upgrade
+#
+# Refuses HTTP/1.1 connection-upgrade requests (e.g. WebSocket) so
+# upgrade-capable clients fall back to plain HTTP. Upgraded connections
+# are opaque tunnels that bypass body-level filters like metering, so
+# rejecting them keeps every request on the metered HTTP path.
+#
+# Usage:
+#   cargo run -p praxis-ai-proxy -- -c examples/configs/reject-upgrade.yaml
+#   # A normal request passes through:
+#   curl http://localhost:8080/v1/chat/completions \
+#     -d '{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}'
+#   # A WebSocket upgrade is refused (400), so the client retries over HTTP:
+#   curl -i http://localhost:8080/v1/chat/completions \
+#     -H "Connection: Upgrade" -H "Upgrade: websocket"
+#
+# With no `protocols` list, every upgrade is rejected. Set `protocols`
+# to restrict rejection to specific tokens (e.g. only websocket).
+
+listeners:
+  - name: gateway
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - metered
+
+filter_chains:
+  - name: metered
+    filters:
+      # Refuse upgrades before any upstream connection is made, so a
+      # WebSocket handshake can never open an unmetered tunnel.
+      - filter: reject_upgrade
+        protocols:
+          - websocket
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends
