@@ -162,6 +162,7 @@ mod openshell_sandboxed_coding_clients;
 mod project_state_owner_headers;
 mod prompt_enrichment;
 mod provider_route;
+mod reject_upgrade;
 #[cfg(feature = "store-sqlite")]
 mod rehydrate;
 #[cfg(feature = "openai-responses")]
