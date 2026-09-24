@@ -22,7 +22,7 @@ use crate::{
     A2aFilter, AiGuardrailsFilter, ApiKeyAuthFilter, ContentNormalizeFilter, CredentialInjectFilter,
     ExternalMeteringFilter,
     IdentityHeaderGuardFilter, IntelligentRouteFilter, LlmisvcModelProviderResolverFilter, McpFilter, ModelAccessFilter,
-    ModelCatalogFilter, ModelToHeaderFilter, PromptEnrichFilter, ProviderRouteFilter, TimeToFirstTokenFilter,
+    ModelCatalogFilter, ModelToHeaderFilter, PromptEnrichFilter, ProviderRouteFilter, StreamUsageInjectFilter, TimeToFirstTokenFilter,
     ReasoningEffortMapFilter, TokenCountFilter, TokenUsageHeadersFilter,
 };
 
@@ -177,6 +177,14 @@ fn register_gcp_filters(registry: &mut FilterRegistry, subrequest_client: Option
     }
 }
 
+/// Register the Vertex AI dialect translation filter.
+fn register_vertex_filters(registry: &mut FilterRegistry) {
+    praxis_filter::register_filters!(
+        @register registry,
+        http "vertex" => praxis_ai_apis::vertex::VertexFilter::from_config
+    );
+}
+
 /// Register general-purpose AI filters.
 fn register_general_ai_filters(registry: &mut FilterRegistry) {
     register_state_owner(registry);
@@ -327,14 +335,6 @@ fn register_anthropic_filters(registry: &mut FilterRegistry, subrequest_client: 
         http "anthropic_messages_to_chat_completions_stream" => praxis_ai_apis::anthropic::AnthropicMessagesToChatCompletionsStreamFilter::from_config
     );
     register_anthropic_web_search(registry, subrequest_client);
-}
-
-/// Register Vertex AI translation filters.
-fn register_vertex_filters(registry: &mut FilterRegistry) {
-    praxis_filter::register_filters!(
-        @register registry,
-        http "openai_chat_completions_to_vertexai_gemini" => praxis_ai_apis::vertex::OpenaiChatCompletionsToVertexaiGeminiFilter::from_config
-    );
 }
 
 /// Register OpenAI Responses API request-path filters.
