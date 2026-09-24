@@ -189,10 +189,7 @@ mod token_rate_limit_sentinel;
 mod token_usage_headers;
 mod token_usage_metrics;
 mod vector_stores_routing;
-#[cfg(feature = "vertex-anthropic-filter")]
 mod vertex_anthropic;
-mod vertex_gemini;
-#[cfg(feature = "openai-responses")]
 mod vllm_agentic_api;
 #[cfg(feature = "openai-responses")]
 mod web_search;
