@@ -3569,6 +3569,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "http",
+ "jsonwebtoken",
  "metrics",
  "metrics-util",
  "notify",
