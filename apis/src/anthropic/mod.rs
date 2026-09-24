@@ -11,9 +11,15 @@ mod protocol;
 pub mod routes;
 mod web_search;
 mod wire;
+<<<<<<< HEAD
 
 pub use messages_request::{AnthropicMessagesRequestFilter, AnthropicMessagesState};
+=======
+pub use messages_format::AnthropicMessagesFormatFilter;
+>>>>>>> dc338bd8 (feat(filter): add Vertex AI rawPredict dialect translation filter)
 pub use messages_to_chat_completions::AnthropicMessagesToChatCompletionsFilter;
 pub use messages_to_chat_completions_stream::AnthropicMessagesToChatCompletionsStreamFilter;
 pub use protocol::AnthropicMessagesProtocolFilter;
 pub use web_search::AnthropicWebSearchFilter;
+pub(crate) use wire::{error_body, invalid_request_rejection};
+pub(crate) use wire::{error_body, invalid_request_rejection};
