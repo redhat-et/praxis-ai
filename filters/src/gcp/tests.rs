@@ -320,19 +320,24 @@ async fn fetch_parses_bearer_and_ttl_for_metadata_source() {
 }
 
 #[tokio::test]
-async fn fetch_errors_for_service_account_key_source() {
+async fn fetch_errors_for_invalid_service_account_key_source() {
     let client = test_client();
     let err = token::fetch(
         &client,
-        &TokenSource::ServiceAccountKey,
+        &TokenSource::ServiceAccountKey(token::ServiceAccountKey {
+            client_email: "test@example.iam.gserviceaccount.com".to_owned(),
+            private_key_pem: "invalid".to_owned(),
+            token_url: "https://oauth2.googleapis.com/token".to_owned(),
+            loopback_test: false,
+        }),
         "unused",
         "scope",
         std::time::Duration::from_secs(5),
     )
     .await
-    .expect_err("key_file fetch is not implemented and must error, not hang or silently fail closed forever");
+    .expect_err("invalid key fetch must fail closed");
     assert!(
-        err.to_string().contains("not implemented"),
+        err.to_string().contains("invalid private key"),
         "error must explain why, got: {err}"
     );
 }

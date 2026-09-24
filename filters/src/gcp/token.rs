@@ -5,12 +5,9 @@
 //!
 //! [`fetch`] acquires a token for the [`Metadata`](TokenSource::Metadata)
 //! source from the GCE/GKE metadata server. The
-//! [`ServiceAccountKey`](TokenSource::ServiceAccountKey) source (a parsed
-//! `type: service_account` key file) is resolved and validated at
-//! construct time but its token fetch is not implemented yet — it needs
-//! `JWT` signing, which this workspace does not currently depend on — so
-//! [`fetch`] returns a clear error for it rather than the cache silently
-//! staying empty forever.
+//! [`ServiceAccountKey`](TokenSource::ServiceAccountKey) mints a token by
+//! signing a short-lived `JWT` assertion and exchanging it at Google's
+//! OAuth2 token endpoint.
 
 use std::{path::Path, time::Duration};
 
@@ -25,6 +22,10 @@ use serde::Deserialize;
 
 use super::config::{GcpAdcConfig, GcpAdcSource};
 
+const JWT_BEARER_GRANT: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
+const ASSERTION_LIFETIME: Duration = Duration::from_secs(600);
+const GOOGLE_TOKEN_HOST: &str = "oauth2.googleapis.com";
+
 // -----------------------------------------------------------------------------
 // TokenSource
 // -----------------------------------------------------------------------------
@@ -38,10 +39,16 @@ pub(super) enum TokenSource {
         service_account: String,
     },
 
-    /// Parsed `type: service_account` key file. Fetch is not implemented
-    /// yet (requires `JWT` signing); [`fetch`] returns an error for this
-    /// source so requests fail closed with a clear reason.
-    ServiceAccountKey,
+    /// Parsed `type: service_account` key file.
+    ServiceAccountKey(ServiceAccountKey),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ServiceAccountKey {
+    pub client_email: String,
+    pub private_key_pem: String,
+    pub token_url: String,
+    pub loopback_test: bool,
 }
 
 // -----------------------------------------------------------------------------
@@ -59,6 +66,12 @@ struct MetadataTokenResponse {
     expires_in: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct TokenEndpointResponse {
+    access_token: String,
+    expires_in: u64,
+}
+
 /// Acquire a token for `source`.
 ///
 /// Kept free of caching concerns so it fits
@@ -68,8 +81,7 @@ struct MetadataTokenResponse {
 /// # Errors
 ///
 /// Returns [`FilterError`] if the metadata request fails, returns a
-/// non-success status, or its body cannot be parsed; or, for
-/// [`TokenSource::ServiceAccountKey`], always (not implemented).
+/// non-success status, or its body cannot be parsed.
 #[cfg(test)]
 pub(super) async fn fetch(
     client: &SubRequestClient,
@@ -82,10 +94,9 @@ pub(super) async fn fetch(
         TokenSource::Metadata { service_account } => {
             fetch_metadata_token(client, metadata_host, service_account, scope, timeout).await
         },
-        TokenSource::ServiceAccountKey => Err(FilterError::from(
-            "gcp_adc: token fetch for source key_file is not implemented yet (requires JWT signing); \
-             use source: adc or source: metadata on a GCE/GKE instance instead",
-        )),
+        TokenSource::ServiceAccountKey(key) => {
+            fetch_service_account_token(client, key, scope, timeout, AddressPolicy::AllowPrivate).await
+        },
     }
 }
 
@@ -100,15 +111,16 @@ pub(super) async fn fetch_pinned(
     scope: &str,
     timeout: Duration,
 ) -> Result<(HeaderValue, Duration), FilterError> {
-    let TokenSource::Metadata { service_account } = source else {
-        return Err(FilterError::from(
-            "gcp_adc: token fetch for source key_file is not implemented yet (requires JWT signing); \
-             use source: adc or source: metadata on a GCE/GKE instance instead",
-        ));
-    };
-
-    let url = metadata_token_url(metadata_host, service_account, scope);
-    fetch_metadata_token_url(client, &url, timeout, metadata_address_policy(metadata_host)).await
+    match source {
+        TokenSource::Metadata { service_account } => {
+            let url = metadata_token_url(metadata_host, service_account, scope);
+            fetch_metadata_token_url(client, &url, timeout, metadata_address_policy(metadata_host)).await
+        },
+        TokenSource::ServiceAccountKey(key) => {
+            let policy = if key.loopback_test { AddressPolicy::AllowPrivate } else { AddressPolicy::PublicOnly };
+            fetch_service_account_token(client, key, scope, timeout, policy).await
+        },
+    }
 }
 
 /// Use the production metadata-only policy except for literal loopback mocks
@@ -171,20 +183,75 @@ async fn fetch_metadata_token_url(
         .await
         .map_err(|e| FilterError::from(format!("gcp_adc: metadata token request failed: {e}")))?;
 
-    let status = http::StatusCode::from_u16(response.status).unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
+    parse_token_response(response.status, &response.body, "metadata")
+}
+
+async fn fetch_service_account_token(
+    client: &SubRequestClient,
+    key: &ServiceAccountKey,
+    scope: &str,
+    timeout: Duration,
+    address_policy: AddressPolicy,
+) -> Result<(HeaderValue, Duration), FilterError> {
+    let assertion = sign_assertion(key, scope)?;
+    let body = format!(
+        "grant_type={JWT_BEARER_GRANT}&assertion={assertion}",
+        assertion = url::form_urlencoded::byte_serialize(assertion.as_bytes()).collect::<String>()
+    );
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/x-www-form-urlencoded"),
+    );
+    let request = SubRequest {
+        method: http::Method::POST,
+        uri: http::Uri::default(),
+        headers,
+        body: Bytes::from(body),
+    };
+    let response = execute_url(client, &key.token_url, request, 65_536, timeout, address_policy)
+        .await
+        .map_err(|e| FilterError::from(format!("gcp_adc: service-account token request failed: {e}")))?;
+    parse_token_response(response.status, &response.body, "service-account")
+}
+
+#[derive(serde::Serialize)]
+struct AssertionClaims<'a> {
+    iss: &'a str,
+    scope: &'a str,
+    aud: &'a str,
+    iat: u64,
+    exp: u64,
+}
+
+fn sign_assertion(key: &ServiceAccountKey, scope: &str) -> Result<String, FilterError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| FilterError::from(format!("gcp_adc: system clock before Unix epoch: {e}")))?
+        .as_secs();
+    let claims = AssertionClaims {
+        iss: &key.client_email,
+        scope,
+        aud: &key.token_url,
+        iat: now,
+        exp: now.saturating_add(ASSERTION_LIFETIME.as_secs()),
+    };
+    let signing_key = jsonwebtoken::EncodingKey::from_rsa_pem(key.private_key_pem.as_bytes())
+        .map_err(|e| FilterError::from(format!("gcp_adc: invalid private key in credentials file: {e}")))?;
+    jsonwebtoken::encode(&jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256), &claims, &signing_key)
+        .map_err(|e| FilterError::from(format!("gcp_adc: failed to sign service-account assertion: {e}")))
+}
+
+fn parse_token_response(status_code: u16, body: &[u8], context: &str) -> Result<(HeaderValue, Duration), FilterError> {
+    let status = http::StatusCode::from_u16(status_code).unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
     if !status.is_success() {
-        return Err(FilterError::from(format!(
-            "gcp_adc: metadata server returned HTTP status {status}"
-        )));
+        return Err(FilterError::from(format!("gcp_adc: {context} token endpoint returned HTTP status {status}")));
     }
-
-    let token: MetadataTokenResponse = serde_json::from_slice(&response.body)
-        .map_err(|e| FilterError::from(format!("gcp_adc: failed to parse metadata token response: {e}")))?;
-
+    let token: TokenEndpointResponse = serde_json::from_slice(body)
+        .map_err(|e| FilterError::from(format!("gcp_adc: failed to parse {context} token response: {e}")))?;
     let mut authorization = HeaderValue::from_str(&format!("Bearer {}", token.access_token))
-        .map_err(|e| FilterError::from(format!("gcp_adc: token is not a valid header value: {e}")))?;
+        .map_err(|e| FilterError::from(format!("gcp_adc: {context} token is not a valid header value: {e}")))?;
     authorization.set_sensitive(true);
-
     Ok((authorization, Duration::from_secs(token.expires_in)))
 }
 
@@ -193,12 +260,18 @@ async fn fetch_metadata_token_url(
 // GoogleApplicationCredentials
 // -----------------------------------------------------------------------------
 
-/// Discriminator-only parse of a Google ADC JSON file.
+/// Parse of a Google ADC JSON file.
 #[derive(Debug, Deserialize)]
 struct GoogleApplicationCredentials {
     /// Google credential `type` field.
     #[serde(rename = "type")]
     cred_type: String,
+    #[serde(default)]
+    client_email: Option<String>,
+    #[serde(default)]
+    private_key: Option<String>,
+    #[serde(default)]
+    token_uri: Option<String>,
 }
 
 // -----------------------------------------------------------------------------
@@ -253,7 +326,7 @@ fn parse_credential_file(path: &Path) -> Result<TokenSource, FilterError> {
         ))
     })?;
     match parsed.cred_type.as_str() {
-        "service_account" => Ok(TokenSource::ServiceAccountKey),
+        "service_account" => service_account_source(parsed),
         "authorized_user" => Err(FilterError::from(
             "gcp_adc: gcloud user ADC (authorized_user) is not supported",
         )),
@@ -264,4 +337,46 @@ fn parse_credential_file(path: &Path) -> Result<TokenSource, FilterError> {
             "gcp_adc: unsupported credential type '{other}'"
         ))),
     }
+}
+
+fn service_account_source(parsed: GoogleApplicationCredentials) -> Result<TokenSource, FilterError> {
+    let client_email = parsed
+        .client_email
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| FilterError::from("gcp_adc: credentials file is missing client_email"))?;
+    super::config::validate_service_account(&client_email)?;
+    let private_key_pem = parsed
+        .private_key
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| FilterError::from("gcp_adc: credentials file is missing private_key"))?;
+    let token_uri = parsed
+        .token_uri
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| FilterError::from("gcp_adc: credentials file is missing token_uri"))?;
+    let token_url = validate_token_uri(&token_uri)?;
+    Ok(TokenSource::ServiceAccountKey(ServiceAccountKey {
+        client_email,
+        private_key_pem,
+        loopback_test: token_url.starts_with("http://127.0.0.1"),
+        token_url,
+    }))
+}
+
+fn validate_token_uri(raw: &str) -> Result<String, FilterError> {
+    let parsed = url::Url::parse(raw)
+        .map_err(|e| FilterError::from(format!("gcp_adc: credentials file token_uri is invalid: {e}")))?;
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err("gcp_adc: credentials file token_uri must not contain credentials, query, or fragment".into());
+    }
+    let host = parsed.host_str().unwrap_or("");
+    let google = parsed.scheme() == "https" && host == GOOGLE_TOKEN_HOST && parsed.path() == "/token";
+    let loopback = cfg!(test) && parsed.scheme() == "http" && host == "127.0.0.1";
+    if !google && !loopback {
+        return Err("gcp_adc: credentials file token_uri must be https://oauth2.googleapis.com/token".into());
+    }
+    Ok(parsed.to_string())
 }
