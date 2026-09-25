@@ -164,6 +164,10 @@ fn transform_messages(obj: &mut serde_json::Map<String, Value>, publisher: &str,
     // Vertex rejects an unknown body `model` field with
     // `model: Extra inputs are not permitted`.
     obj.remove("model");
+    // Vertex's Anthropic partner endpoint does not accept the Claude API's
+    // client-side context-management control field. Drop it at the dialect
+    // boundary rather than forwarding a request Vertex will reject.
+    obj.remove("context_management");
     obj.insert(
         "anthropic_version".to_owned(),
         Value::String(VERTEX_ANTHROPIC_VERSION.to_owned()),
@@ -225,6 +229,23 @@ mod tests {
         );
         assert_eq!(parsed["anthropic_version"], VERTEX_ANTHROPIC_VERSION);
         assert_eq!(parsed["max_tokens"], 8, "other fields must pass through");
+    }
+
+    #[test]
+    fn messages_drop_vertex_unsupported_context_management() {
+        let body = json!({
+            "model": "vertex/claude-sonnet-4-5",
+            "max_tokens": 8,
+            "context_management": {"edits": [{"type": "clear_thinking_20251015"}]},
+            "messages": []
+        })
+        .to_string();
+        let out = transform_request(body.as_bytes(), Operation::Messages, &cfg())
+            .unwrap()
+            .unwrap();
+        let parsed: Value = serde_json::from_slice(&out.body).unwrap();
+        assert!(parsed.get("context_management").is_none());
+        assert_eq!(parsed["anthropic_version"], VERTEX_ANTHROPIC_VERSION);
     }
 
     #[test]
