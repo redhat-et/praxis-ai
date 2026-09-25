@@ -3579,6 +3579,7 @@ dependencies = [
  "praxis-proxy-tls",
  "rand 0.10.3",
  "redis",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_json_canonicalizer",
