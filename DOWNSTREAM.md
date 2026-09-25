@@ -44,6 +44,7 @@ column is the build source of record. Upstream status was checked against
 | `reject_upgrade` | Reject upgrades that bypass the metered request/response path | ET `a8e735a3`, `ef79aa79`; `filters/src/reject_upgrade/` | No upstream PR found |
 | `stream_usage_inject` | Request usage reporting on OpenAI Chat Completions streams | ET `0c900057`, `050611fc`; `filters/src/token_usage/stream_usage.rs` | [PR #1231](https://github.com/praxis-proxy/ai/pull/1231) is open |
 | GCP `key_file` token source + cluster scope | Mint short-lived GCP tokens from a mounted SA key, only for the selected Vertex cluster | ET `769203cf`, `7f258fb4`; `filters/src/gcp/` | [PR #1356](https://github.com/praxis-proxy/ai/pull/1356) is open with the cluster-scope fix; base `gcp_adc` exists upstream |
+| GCP test-key hygiene | Generate ephemeral RSA material in tests instead of committing a PEM private key | ET `72263b1d`; `filters/src/gcp/tests.rs` | Included in the downstream; matching fixture cleanup is a fixup on open PR #1356 |
 | Vertex dialect routing | Translate only `vertex/*` models and route them to Vertex | ET `dc338bd8`, `9a5f1b23`; `apis/src/vertex/` | [PR #1358](https://github.com/praxis-proxy/ai/pull/1358) is open |
 | StreamBuffer token-count correction | Prevent double-delivered JSON bodies from becoming zero-usage events | ET `05b8993a`, `57c4d14e`; `filters/src/token_usage/count.rs` | [PR #1360](https://github.com/praxis-proxy/ai/pull/1360) is open |
 
