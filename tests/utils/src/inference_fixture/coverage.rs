@@ -1213,6 +1213,7 @@ mod tests {
                 "chat_completions_to_bedrock_converse",
                 "messages_to_chat_completions",
                 "messages_native_passthrough",
+                "messages_to_vertex",
                 "responses_agentic_loop",
                 "responses_native_passthrough",
                 "openai_responses_to_chat_completions",
@@ -1249,6 +1250,7 @@ mod tests {
                 vec!["messages_native_passthrough"],
                 vec!["messages_native_passthrough"],
                 vec!["messages_native_passthrough"],
+                vec!["messages_to_vertex"],
                 vec!["responses_native_passthrough"],
                 vec!["responses_native_passthrough"],
                 vec!["responses_native_passthrough"],
@@ -1327,6 +1329,7 @@ mod tests {
                 CoverageStatus::LiveCovered,
                 CoverageStatus::LiveCovered,
                 CoverageStatus::LiveCovered,
+                CoverageStatus::SyntheticOnly,
                 CoverageStatus::SyntheticOnly,
                 CoverageStatus::LiveCovered,
                 CoverageStatus::LiveCovered,
@@ -1407,6 +1410,7 @@ mod tests {
                 "messages/upstream-error",
                 "messages/upstream-error-stream",
                 "messages/upstream-error-unknown-type",
+                "messages/vertex-model-alias",
                 "responses/agentic-deferred-mcp-connectors",
                 "responses/agentic-parallel-tool-calls",
                 "responses/agentic-status-less-function-call",
@@ -1554,6 +1558,10 @@ mod tests {
                 (
                     &"messages.native.count_tokens".to_owned(),
                     &vec!["messages/native-count-tokens".to_owned()]
+                ),
+                (
+                    &"messages.vertex.model_alias".to_owned(),
+                    &vec!["messages/vertex-model-alias".to_owned()]
                 ),
                 (
                     &"responses.native.request".to_owned(),
@@ -2051,6 +2059,27 @@ mod tests {
         assert_eq!(native_stream.turns[0].expect.client_body_kind, BodyKind::Sse);
         assert_eq!(native_stream.turns[0].expect.client_sse_interleaved_events, ["ping"]);
         assert_eq!(native_stream.turns[0].expect.upstream_sse_interleaved_events, ["ping"]);
+
+        let vertex_alias = InferenceScenario::load(&root.join("scenarios/messages/vertex-model-alias.yaml")).unwrap();
+        assert_eq!(vertex_alias.id, "messages/vertex-model-alias");
+        assert_eq!(
+            vertex_alias.description,
+            "Stable Anthropic model ID maps to Vertex and is restored in the client response."
+        );
+        assert_eq!(vertex_alias.protocol, InferenceProtocol::AnthropicMessages);
+        assert_eq!(vertex_alias.example_config, "vertex-anthropic.yaml");
+        assert_eq!(vertex_alias.upstream_authority, "127.0.0.1:3000");
+        assert_eq!(vertex_alias.features, ["messages.vertex.model_alias"]);
+        assert_eq!(vertex_alias.turns.len(), 1);
+        assert_eq!(vertex_alias.turns[0].request.path, "/v1/messages");
+        assert_eq!(
+            vertex_alias.turns[0].expect.upstream_path,
+            "/v1/projects/my-gcp-project/locations/global/publishers/anthropic/models/claude-sonnet-4-5:rawPredict"
+        );
+        let RecordedBody::Json { value } = &vertex_alias.turns[0].request.body else {
+            panic!("Vertex alias request body must be JSON");
+        };
+        assert_eq!(value["model"], "claude-sonnet-4-5");
 
         let responses_nonstream =
             InferenceScenario::load(&root.join("scenarios/responses/native-basic-nonstream.yaml")).unwrap();
