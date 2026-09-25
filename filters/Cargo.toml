@@ -108,6 +108,9 @@ zeroize = { workspace = true, features = ["serde"] }
 # The SigV4 reference implementation the OpenSSL-backed signer is checked
 # against (filters/src/aws/signing.rs); never linked into the binary.
 aws-sigv4 = { workspace = true }
+# Generate ephemeral RSA material for GCP key-file auth tests. No test
+# credential is checked into the repository.
+openssl.workspace = true
 metrics-util = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
