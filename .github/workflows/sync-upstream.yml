@@ -1,0 +1,39 @@
+name: Sync upstream main
+
+on:
+  schedule:
+    - cron: "17 9 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out ET fork
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Merge upstream main into fork main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/praxis-proxy/ai.git
+          git fetch --no-tags upstream main
+
+          upstream_sha="$(git rev-parse upstream/main)"
+          if git merge-base --is-ancestor "$upstream_sha" HEAD; then
+            echo "ET main already contains upstream main at $upstream_sha"
+            exit 0
+          fi
+
+          git merge --no-edit --no-ff "$upstream_sha"
+          git push origin HEAD:main
