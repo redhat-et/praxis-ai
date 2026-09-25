@@ -25,7 +25,7 @@ use crate::{
     ExternalMeteringFilter,
     IdentityHeaderGuardFilter, IntelligentRouteFilter, LlmisvcModelProviderResolverFilter, McpFilter, ModelAccessFilter,
     ModelCatalogFilter, ModelToHeaderFilter, PromptEnrichFilter, ProviderRouteFilter, TimeToFirstTokenFilter,
-    TokenCountFilter, TokenUsageHeadersFilter,
+    ReasoningEffortMapFilter, TokenCountFilter, TokenUsageHeadersFilter,
 };
 
 /// Register all in-tree AI HTTP filters into `registry`.
@@ -249,15 +249,11 @@ fn register_request_metadata_filters(registry: &mut FilterRegistry) {
 fn register_inference_filters(registry: &mut FilterRegistry) {
     praxis_filter::register_filters!(
         @register registry,
-        http "model_to_header" => ModelToHeaderFilter::from_config
+        http "reasoning_effort_map" => ReasoningEffortMapFilter::from_config
     );
     praxis_filter::register_filters!(
         @register registry,
-        http "model_to_provider" => ModelToProviderFilter::from_config
-    );
-    praxis_filter::register_filters!(
-        @register registry,
-        http "llmisvc_model_provider_resolver" => LlmisvcModelProviderResolverFilter::from_config
+        http "time_to_first_token" => TimeToFirstTokenFilter::from_config
     );
 }
 
