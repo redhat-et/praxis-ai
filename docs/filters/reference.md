@@ -125,6 +125,12 @@ see the [Praxis core filter reference][core-ref].
 |--------|-------------|
 | [`prompt_enrich`](prompt_enrich.md) | Injects statically configured messages into the `messages` array of OpenAI-compatible chat completion request bodies. |
 
+### Reasoning Effort Map
+
+| Filter | Description |
+|--------|-------------|
+| [`reasoning_effort_map`](reasoning_effort_map.md) | Rewrites `reasoning_effort` / `reasoning.effort` for configured clusters so clients can send effort values the backend rejects. |
+
 ### Routing
 
 | Filter | Description |

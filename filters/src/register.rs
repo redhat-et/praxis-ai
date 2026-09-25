@@ -21,7 +21,7 @@ use crate::{
     ExternalMeteringFilter,
     IdentityHeaderGuardFilter, IntelligentRouteFilter, LlmisvcModelProviderResolverFilter, McpFilter, ModelAccessFilter,
     ModelCatalogFilter, ModelToHeaderFilter, PromptEnrichFilter, ProviderRouteFilter, TimeToFirstTokenFilter,
-    TokenCountFilter, TokenUsageHeadersFilter,
+    ReasoningEffortMapFilter, TokenCountFilter, TokenUsageHeadersFilter,
 };
 
 /// Register all in-tree AI HTTP filters into `registry`.
@@ -175,6 +175,10 @@ fn register_general_ai_filters(registry: &mut FilterRegistry) {
     praxis_filter::register_filters!(
         @register registry,
         http "prompt_enrich" => PromptEnrichFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
+        http "reasoning_effort_map" => ReasoningEffortMapFilter::from_config
     );
     praxis_filter::register_filters!(
         @register registry,
