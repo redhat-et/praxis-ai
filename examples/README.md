@@ -43,6 +43,7 @@ before sending requests.
 | [mcp-stateless-broker.yaml](configs/mcp-stateless-broker.yaml) | Configurable stateless MCP broker using the final MCP 2026-07-28 stateless profile |
 | [model-catalog.yaml](configs/model-catalog.yaml) | Answers GET /v1/models from static configuration instead of forwarding it upstream |
 | [model-to-header-routing.yaml](configs/model-to-header-routing.yaml) | Routes LLM API requests to different backends based on the "model" field in the JSON request body |
+| [model-to-provider.yaml](configs/model-to-provider.yaml) | Map a stable public model ID to a provider route and provider-specific model |
 | [nemo-guardrails-response.yaml](configs/nemo-guardrails-response.yaml) | Evaluates upstream responses against a NeMo Guardrails service |
 | [nemo-guardrails.yaml](configs/nemo-guardrails.yaml) | Evaluates incoming requests against a NeMo Guardrails service |
 | [project-state-owner-headers.yaml](configs/project-state-owner-headers.yaml) | Demonstrates the production boundary used when an external authenticator injects separate tenant and subject headers. `state_owner` consumes those assertions into an immutable internal owner and strips the inbound copies. `project_state_owner_headers` then recreates destination-specific headers from that normalized context |
@@ -55,7 +56,7 @@ before sending requests.
 | [token-rate-limit-mixed-algorithms.yaml](configs/token-rate-limit-mixed-algorithms.yaml) | Extends token-rate-limit.yaml with per-rule algorithm choice (ai#789 / praxis#551): each rule in `rules:` independently picks sliding_window or token_bucket, matched by a static header value. team-alpha gets an exact trailing-window budget; team-beta gets a continuously-refilling bucket |
 | [token-rate-limit.yaml](configs/token-rate-limit.yaml) | Reserves an estimated token cost at admission time and reconciles that reservation against actual provider-reported usage once the response completes |
 | [token-usage-headers.yaml](configs/token-usage-headers.yaml) | Inject Praxis-Token-Input, Praxis-Token-Output, and Praxis-Token-Total headers into downstream responses when token counts are available in filter metadata |
-| [vertex-anthropic.yaml](configs/vertex-anthropic.yaml) | Production note: replace the static credential_injection below with the experimental `gcp_adc` filter (source: key_file) so the gateway mints short-lived OAuth tokens from a service-account key instead of a static value, and point the cluster at aiplatform.googleapis.com:443 with tls.sni likewise |
+| [vertex-anthropic.yaml](configs/vertex-anthropic.yaml) | Maps the public model ID `claude-sonnet-4-5` to the Vertex target, then rewrites Anthropic Messages requests into Vertex AI rawPredict form |
 
 ### Anthropic
 

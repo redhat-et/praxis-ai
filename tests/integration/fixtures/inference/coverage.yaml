@@ -2,6 +2,7 @@ version: 1
 scope:
   - messages_to_chat_completions
   - messages_native_passthrough
+  - messages_to_vertex
   - responses_agentic_loop
   - responses_native_passthrough
   - responses_to_chat_completions
@@ -132,6 +133,15 @@ features:
     status: synthetic_only
     scenarios:
       - messages/native-count-tokens
+    providers:
+      synthetic:
+        status: synthetic_only
+  - id: messages.vertex.model_alias
+    scopes:
+      - messages_to_vertex
+    status: synthetic_only
+    scenarios:
+      - messages/vertex-model-alias
     providers:
       synthetic:
         status: synthetic_only

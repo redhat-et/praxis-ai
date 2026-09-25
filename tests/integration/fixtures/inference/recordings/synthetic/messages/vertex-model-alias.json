@@ -1,0 +1,130 @@
+{
+  "version": 1,
+  "scenario_id": "messages/vertex-model-alias",
+  "protocol": "anthropic_messages",
+  "provenance": {
+    "kind": "synthetic",
+    "provider": "synthetic",
+    "model": "claude-sonnet-4-5",
+    "source_id": "controlled-vertex-public-model-alias"
+  },
+  "normalization": {
+    "version": 1,
+    "linked_ids": {
+      "msg_synthetic_vertex_1": "msg_recorded_0001"
+    }
+  },
+  "turns": [
+    {
+      "name": "initial",
+      "client": {
+        "request": {
+          "method": "POST",
+          "path": "/v1/messages",
+          "headers": {
+            "content-type": [
+              "application/json"
+            ]
+          },
+          "body": {
+            "kind": "json",
+            "value": {
+              "max_tokens": 32,
+              "messages": [
+                {
+                  "content": "Reply with one word.",
+                  "role": "user"
+                }
+              ],
+              "model": "claude-sonnet-4-5",
+              "stream": false
+            }
+          }
+        },
+        "response": {
+          "status": 200,
+          "headers": {
+            "content-type": [
+              "application/json"
+            ]
+          },
+          "body": {
+            "kind": "json",
+            "value": {
+              "content": [
+                {
+                  "text": "Hello.",
+                  "type": "text"
+                }
+              ],
+              "id": "msg_recorded_0001",
+              "model": "claude-sonnet-4-5",
+              "role": "assistant",
+              "stop_reason": "end_turn",
+              "stop_sequence": null,
+              "type": "message",
+              "usage": {
+                "input_tokens": 4,
+                "output_tokens": 2
+              }
+            }
+          }
+        }
+      },
+      "upstream": {
+        "request": {
+          "method": "POST",
+          "path": "/v1/projects/my-gcp-project/locations/global/publishers/anthropic/models/claude-sonnet-4-5:rawPredict",
+          "headers": {
+            "content-type": [
+              "application/json"
+            ]
+          },
+          "body": {
+            "kind": "json",
+            "value": {
+              "anthropic_version": "vertex-2023-10-16",
+              "max_tokens": 32,
+              "messages": [
+                {
+                  "content": "Reply with one word.",
+                  "role": "user"
+                }
+              ],
+              "stream": false
+            }
+          }
+        },
+        "response": {
+          "status": 200,
+          "headers": {
+            "content-type": [
+              "application/json"
+            ]
+          },
+          "body": {
+            "kind": "json",
+            "value": {
+              "content": [
+                {
+                  "text": "Hello.",
+                  "type": "text"
+                }
+              ],
+              "id": "msg_recorded_0001",
+              "model": "claude-sonnet-4-5-20250929",
+              "role": "assistant",
+              "stop_reason": "end_turn",
+              "stop_sequence": null,
+              "type": "message",
+              "usage": {
+                "input_tokens": 4,
+                "output_tokens": 2
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

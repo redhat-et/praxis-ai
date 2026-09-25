@@ -19,9 +19,9 @@ use crate::TokenRateLimitFilter;
 use crate::{
     A2aFilter, AiGuardrailsFilter, ApiKeyAuthFilter, ContentNormalizeFilter, CredentialInjectFilter,
     ExternalMeteringFilter, IdentityHeaderGuardFilter, IntelligentRouteFilter, LlmisvcModelProviderResolverFilter,
-    McpFilter, ModelAccessFilter, ModelCatalogFilter, ModelToHeaderFilter, PromptEnrichFilter, ProviderRouteFilter,
-    ReasoningEffortMapFilter, RejectUpgradeFilter, StreamUsageInjectFilter, TimeToFirstTokenFilter, TokenCountFilter,
-    TokenUsageHeadersFilter,
+    McpFilter, ModelAccessFilter, ModelCatalogFilter, ModelToHeaderFilter, ModelToProviderFilter, PromptEnrichFilter,
+    ProviderRouteFilter, ReasoningEffortMapFilter, RejectUpgradeFilter, StreamUsageInjectFilter,
+    TimeToFirstTokenFilter, TokenCountFilter, TokenUsageHeadersFilter,
 };
 
 /// Register all in-tree AI HTTP filters into `registry`.
@@ -178,6 +178,10 @@ fn register_general_ai_filters(registry: &mut FilterRegistry) {
     praxis_filter::register_filters!(
         @register registry,
         http "model_to_header" => ModelToHeaderFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
+        http "model_to_provider" => ModelToProviderFilter::from_config
     );
     praxis_filter::register_filters!(
         @register registry,
@@ -679,6 +683,7 @@ mod tests {
             "ai_guardrails",
             "identity_header_guard",
             "llmisvc_model_provider_resolver",
+            "model_to_provider",
             "state_owner",
             "project_state_owner_headers",
             "callout_credentials",

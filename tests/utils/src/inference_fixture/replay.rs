@@ -432,6 +432,10 @@ fn is_replay_contained_filter(filter_type: &str) -> bool {
             | "openai_responses_rehydrate"
             | "openai_stream_events"
             | "openai_tool_parse"
+            | "credential_injection"
+            | "model_to_header"
+            | "model_to_provider"
+            | "vertex"
             | "responses_to_chat_completions"
             | "router"
             | "load_balancer"
@@ -2728,6 +2732,13 @@ mod tests {
         let source = replay_config_source("openai/responses/agentic-loop-deferred-mcp-fixture.yaml");
         let config = Config::from_yaml(&source).expect("deferred MCP fixture config should parse");
         validate_replay_filters(&config).expect("deferred MCP fixture contains only replay-safe filters");
+    }
+
+    #[test]
+    fn replay_config_allows_vertex_model_alias_fixture() {
+        let source = replay_config_source("vertex-anthropic.yaml");
+        let config = Config::from_yaml(&source).expect("Vertex alias example config should parse");
+        validate_replay_filters(&config).expect("Vertex alias example contains only replay-safe filters");
     }
 
     #[test]

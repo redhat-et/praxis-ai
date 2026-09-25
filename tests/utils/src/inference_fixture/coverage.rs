@@ -1212,6 +1212,7 @@ mod tests {
             vec![
                 "messages_to_chat_completions",
                 "messages_native_passthrough",
+                "messages_to_vertex",
                 "responses_agentic_loop",
                 "responses_native_passthrough",
                 "responses_to_chat_completions",
@@ -1238,6 +1239,7 @@ mod tests {
                 vec!["messages_native_passthrough"],
                 vec!["messages_native_passthrough"],
                 vec!["messages_native_passthrough"],
+                vec!["messages_to_vertex"],
                 vec!["responses_native_passthrough"],
                 vec!["responses_native_passthrough"],
                 vec!["responses_native_passthrough"],
@@ -1283,6 +1285,7 @@ mod tests {
                 CoverageStatus::LiveCovered,
                 CoverageStatus::LiveCovered,
                 CoverageStatus::SyntheticOnly,
+                CoverageStatus::SyntheticOnly,
                 CoverageStatus::LiveCovered,
                 CoverageStatus::LiveCovered,
                 CoverageStatus::LiveCovered,
@@ -1308,9 +1311,9 @@ mod tests {
                 CoverageStatus::LiveCovered,
             ]
         );
-        assert_eq!(report.features_total, 36);
-        assert_eq!(report.scenarios_total, 37);
-        assert_eq!(report.recordings_total, 42);
+        assert_eq!(report.features_total, 37);
+        assert_eq!(report.scenarios_total, 38);
+        assert_eq!(report.recordings_total, 43);
         assert_eq!(
             scenarios.keys().collect::<Vec<_>>(),
             vec![
@@ -1328,6 +1331,7 @@ mod tests {
                 "messages/typed-server-tools",
                 "messages/unrepresentable-parameters",
                 "messages/upstream-error",
+                "messages/vertex-model-alias",
                 "responses/agentic-deferred-mcp-connectors",
                 "responses/agentic-parallel-tool-calls",
                 "responses/agentic-status-less-function-call",
@@ -1353,7 +1357,7 @@ mod tests {
                 "responses/native-tool-call",
             ]
         );
-        assert_eq!(manifest.features.len(), 36);
+        assert_eq!(manifest.features.len(), 37);
         assert_eq!(manifest.version, 1);
         assert_eq!(
             manifest
@@ -1426,6 +1430,10 @@ mod tests {
                 (
                     &"messages.native.count_tokens".to_owned(),
                     &vec!["messages/native-count-tokens".to_owned()]
+                ),
+                (
+                    &"messages.vertex.model_alias".to_owned(),
+                    &vec!["messages/vertex-model-alias".to_owned()]
                 ),
                 (
                     &"responses.native.request".to_owned(),
@@ -1622,7 +1630,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("synthetic", CoverageStatus::SyntheticOnly)]
         );
-        for feature in &manifest.features[13..16] {
+        assert_eq!(
+            manifest.features[13]
+                .providers
+                .iter()
+                .map(|(provider, coverage)| (provider.as_str(), coverage.status.clone()))
+                .collect::<Vec<_>>(),
+            vec![("synthetic", CoverageStatus::SyntheticOnly)]
+        );
+        for feature in &manifest.features[14..17] {
             assert_eq!(
                 feature
                     .providers
@@ -1635,7 +1651,7 @@ mod tests {
                 ]
             );
         }
-        for feature in &manifest.features[16..35] {
+        for feature in &manifest.features[17..36] {
             assert_eq!(
                 feature
                     .providers
@@ -1646,7 +1662,7 @@ mod tests {
             );
         }
         assert_eq!(
-            manifest.features[35]
+            manifest.features[36]
                 .providers
                 .iter()
                 .map(|(provider, coverage)| (provider.as_str(), coverage.status.clone()))
@@ -1746,6 +1762,27 @@ mod tests {
         assert_eq!(native_stream.turns[0].expect.client_body_kind, BodyKind::Sse);
         assert_eq!(native_stream.turns[0].expect.client_sse_interleaved_events, ["ping"]);
         assert_eq!(native_stream.turns[0].expect.upstream_sse_interleaved_events, ["ping"]);
+
+        let vertex_alias = InferenceScenario::load(&root.join("scenarios/messages/vertex-model-alias.yaml")).unwrap();
+        assert_eq!(vertex_alias.id, "messages/vertex-model-alias");
+        assert_eq!(
+            vertex_alias.description,
+            "Stable Anthropic model ID maps to Vertex and is restored in the client response."
+        );
+        assert_eq!(vertex_alias.protocol, InferenceProtocol::AnthropicMessages);
+        assert_eq!(vertex_alias.example_config, "vertex-anthropic.yaml");
+        assert_eq!(vertex_alias.upstream_authority, "127.0.0.1:3000");
+        assert_eq!(vertex_alias.features, ["messages.vertex.model_alias"]);
+        assert_eq!(vertex_alias.turns.len(), 1);
+        assert_eq!(vertex_alias.turns[0].request.path, "/v1/messages");
+        assert_eq!(
+            vertex_alias.turns[0].expect.upstream_path,
+            "/v1/projects/my-gcp-project/locations/global/publishers/anthropic/models/claude-sonnet-4-5:rawPredict"
+        );
+        let RecordedBody::Json { value } = &vertex_alias.turns[0].request.body else {
+            panic!("Vertex alias request body must be JSON");
+        };
+        assert_eq!(value["model"], "claude-sonnet-4-5");
 
         let responses_nonstream =
             InferenceScenario::load(&root.join("scenarios/responses/native-basic-nonstream.yaml")).unwrap();
