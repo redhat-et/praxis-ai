@@ -91,6 +91,9 @@ pub struct GcpAdcFilter {
     /// Resolved credential source.
     source: TokenSource,
 
+    /// Optional logical upstream cluster allowlist for credential injection.
+    clusters: Vec<String>,
+
     /// `OAuth2` scope requested with the access token.
     scope: String,
 
@@ -117,6 +120,7 @@ impl GcpAdcFilter {
         Ok(Self {
             cache: TokenCache::new(EXPIRY_SKEW),
             source,
+            clusters: config.clusters.clone(),
             scope: config.scope.clone(),
             metadata_host: config.metadata_host.clone(),
             failing: AtomicBool::new(false),
@@ -138,6 +142,11 @@ impl GcpAdcFilter {
                 .map(std::path::Path::new),
         )?))
     }
+
+    /// Whether this filter should inject credentials for the selected upstream.
+    fn cluster_is_in_scope(&self, cluster: Option<&str>) -> bool {
+        self.clusters.is_empty() || cluster.is_some_and(|selected| self.clusters.iter().any(|name| name == selected))
+    }
 }
 
 #[async_trait::async_trait]
@@ -158,6 +167,10 @@ impl praxis_filter::HttpFilter for GcpAdcFilter {
         &self,
         ctx: &mut praxis_filter::HttpFilterContext<'_>,
     ) -> Result<praxis_filter::FilterAction, FilterError> {
+        if !self.cluster_is_in_scope(ctx.cluster_name()) {
+            return Ok(praxis_filter::FilterAction::Continue);
+        }
+
         let fetched = self
             .cache
             .get_or_refresh(|| {
