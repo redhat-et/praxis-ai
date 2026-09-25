@@ -27,15 +27,12 @@ filter_chains:
               x-praxis-ai-provider: vertex
             cluster: vertex
           - path_prefix: "/"
-            cluster: fallback
+            cluster: vertex
       - filter: load_balancer
         clusters:
           - name: vertex
             endpoints:
               - "127.0.0.1:9001"
-          - name: fallback
-            endpoints:
-              - "127.0.0.1:9002"
 
 insecure_options:
   allow_private_endpoints: true
