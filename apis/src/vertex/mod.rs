@@ -9,7 +9,7 @@
 //! requests whose model does not start with the configured `model_prefix`
 //! pass through unchanged, so this filter can share an Anthropic chain with
 //! other suppliers. Matching requests receive the internal
-//! `x-praxis-ai-vertex-route: vertex` marker for the router; the marker must
+//! `x-praxis-ai-provider: vertex` marker for the router; the marker must
 //! be removed before forwarding upstream.
 //!
 //! **Request** — the body's `model` moves into the URL
@@ -19,6 +19,9 @@
 //! field is removed — Vertex rejects it with
 //! `model: Extra inputs are not permitted`. `count_tokens` keeps its
 //! model in the body at a distinct URL.
+//! A preceding `model_to_provider` filter can rewrite a stable public ID to
+//! the Vertex target model and attach the public ID to request metadata; this
+//! filter restores the public ID in JSON and SSE responses.
 //!
 //! **Response** — the snapshot `model` id is restored to the
 //! user-facing id (top-level JSON, or `message.model` inside the
@@ -75,7 +78,7 @@ const STATUS_KEY: &str = "vertex.response_status";
 const ANTHROPIC_BETA: HeaderName = HeaderName::from_static("anthropic-beta");
 /// Internal route marker read by the unified router. Client-supplied
 /// `x-praxis-*` headers are rejected at the protocol boundary.
-pub const ROUTE_HEADER: HeaderName = HeaderName::from_static("x-praxis-ai-vertex-route");
+pub const ROUTE_HEADER: HeaderName = HeaderName::from_static(crate::MODEL_PROVIDER_HEADER);
 /// Route marker value emitted for requests handled by the Vertex supplier.
 const ROUTE_VALUE: HeaderValue = HeaderValue::from_static("vertex");
 
@@ -189,6 +192,10 @@ impl HttpFilter for VertexFilter {
         Ok(FilterAction::Continue)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keeps provider selection and dialect transform in one request decision"
+    )]
     async fn on_request_body(
         &self,
         ctx: &mut HttpFilterContext<'_>,
@@ -205,6 +212,15 @@ impl HttpFilter for VertexFilter {
         let Some(bytes) = body.as_ref().filter(|b| !b.is_empty()) else {
             return Ok(FilterAction::Continue);
         };
+        if ctx
+            .request_headers_to_set
+            .iter()
+            .rev()
+            .find(|(name, _)| name == ROUTE_HEADER)
+            .is_some_and(|(_, value)| value != ROUTE_VALUE)
+        {
+            return Ok(FilterAction::Continue);
+        }
         match transform_request(bytes, operation, &self.config) {
             Ok(Some(transformed)) => {
                 self.filter_beta_flags(ctx);
@@ -214,14 +230,20 @@ impl HttpFilter for VertexFilter {
                     "translated Anthropic request to Vertex rawPredict"
                 );
                 ctx.rewritten_path = Some(transformed.path);
-                ctx.request_headers_to_set
-                    .push((ROUTE_HEADER.clone(), ROUTE_VALUE.clone()));
+                if !ctx.request_headers_to_set.iter().any(|(name, _)| name == ROUTE_HEADER) {
+                    ctx.request_headers_to_set
+                        .push((ROUTE_HEADER.clone(), ROUTE_VALUE.clone()));
+                }
                 // Marks "this request was transformed"; response-side
                 // transforms only run for marked requests. Set here (not
                 // in on_request) because the pre-read body phase may run
                 // before the request phase.
                 ctx.set_metadata(OPERATION_KEY, "handled");
-                ctx.set_metadata(MODEL_KEY, transformed.user_model);
+                let response_model = ctx
+                    .get_metadata(crate::MODEL_PROVIDER_CLIENT_MODEL_METADATA)
+                    .map(str::to_owned)
+                    .unwrap_or(transformed.user_model);
+                ctx.set_metadata(MODEL_KEY, response_model);
                 *body = Some(Bytes::from(transformed.body));
             },
             Ok(None) => return Ok(FilterAction::Continue),
@@ -476,6 +498,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicitly_selected_other_provider_is_not_overridden_by_vertex_prefix() {
+        let filter = filter("project: demo");
+        let request = make_request(Method::POST, "/v1/messages");
+        let mut ctx = make_filter_context(&request);
+        ctx.request_headers_to_set
+            .push((ROUTE_HEADER, HeaderValue::from_static("anthropic")));
+        let original = Bytes::from_static(br#"{"model":"vertex/claude-sonnet-4-5","messages":[]}"#);
+        let mut body = Some(original.clone());
+
+        let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+        assert!(matches!(action, FilterAction::Continue));
+        assert_eq!(body.as_ref(), Some(&original));
+        assert_eq!(ctx.request_headers_to_set.len(), 1);
+        assert_eq!(ctx.request_headers_to_set[0].1, "anthropic");
+        assert!(ctx.get_metadata(OPERATION_KEY).is_none());
+    }
+
+    #[tokio::test]
     async fn stream_true_selects_stream_verb() {
         let filter = filter("project: demo");
         let request = make_request(Method::POST, "/v1/messages");
@@ -675,6 +715,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_alias_is_restored_in_json_response() {
+        let filter = filter("project: demo");
+        let request = make_request(Method::POST, "/v1/messages");
+        let mut ctx = make_filter_context(&request);
+        ctx.set_metadata(crate::MODEL_PROVIDER_CLIENT_MODEL_METADATA, "claude-sonnet-4-5");
+
+        let action = run_request_body(
+            filter.as_ref(),
+            &mut ctx,
+            Bytes::from_static(br#"{"model":"vertex/claude-sonnet-4-5","messages":[]}"#),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(action, FilterAction::Continue));
+        assert_eq!(ctx.get_metadata(MODEL_KEY), Some("claude-sonnet-4-5"));
+        assert!(
+            ctx.request_headers_to_set
+                .iter()
+                .any(|(name, value)| { name == ROUTE_HEADER && value == HeaderValue::from_static("vertex") })
+        );
+
+        let mut response = make_response();
+        response
+            .headers
+            .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        ctx.response_header = Some(&mut response);
+        filter.on_response(&mut ctx).await.unwrap();
+        let mut body = Some(Bytes::from_static(
+            br#"{"type":"message","model":"claude-sonnet-4-5-20250929"}"#,
+        ));
+        filter.on_response_body(&mut ctx, &mut body, true).unwrap();
+        let out: serde_json::Value = serde_json::from_slice(body.unwrap().as_ref()).unwrap();
+        assert_eq!(out["model"], "claude-sonnet-4-5");
+    }
+
+    #[tokio::test]
     async fn sse_model_split_across_chunk_boundary_is_still_restored() {
         // The plan-of-record's mandatory test: the `model` string of the
         // message_start event is split across two wire chunks. Nothing
@@ -722,5 +798,39 @@ mod tests {
             !emitted2.contains("20250929"),
             "snapshot id replaced across the boundary: {emitted2}"
         );
+    }
+
+    #[tokio::test]
+    async fn model_alias_is_restored_in_sse_response() {
+        let filter = filter("project: demo");
+        let request = make_request(Method::POST, "/v1/messages");
+        let mut ctx = make_filter_context(&request);
+        ctx.set_metadata(crate::MODEL_PROVIDER_CLIENT_MODEL_METADATA, "claude-sonnet-4-5");
+
+        let action = run_request_body(
+            filter.as_ref(),
+            &mut ctx,
+            Bytes::from_static(br#"{"model":"vertex/claude-sonnet-4-5","messages":[]}"#),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(action, FilterAction::Continue));
+
+        let mut response = make_response();
+        response
+            .headers
+            .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+        ctx.response_header = Some(&mut response);
+        ctx.current_filter_id = Some(0);
+        filter.on_response(&mut ctx).await.unwrap();
+
+        let event = Bytes::from_static(
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-5-20250929\"}}\n\n",
+        );
+        let mut body = Some(event);
+        filter.on_response_body(&mut ctx, &mut body, true).unwrap();
+        let emitted = String::from_utf8(body.unwrap().to_vec()).unwrap();
+        assert!(emitted.contains("\"model\":\"claude-sonnet-4-5\""), "{emitted}");
+        assert!(!emitted.contains("20250929"), "{emitted}");
     }
 }

@@ -1,0 +1,32 @@
+version: 1
+id: messages/vertex-model-alias
+description: Stable Anthropic model ID maps to Vertex and is restored in the client response.
+protocol: anthropic_messages
+example_config: vertex-anthropic.yaml
+upstream_authority: 127.0.0.1:3000
+features:
+  - messages.vertex.model_alias
+turns:
+  - name: initial
+    request:
+      method: POST
+      path: /v1/messages
+      headers:
+        content-type:
+          - application/json
+      body:
+        kind: json
+        value:
+          model: claude-sonnet-4-5
+          max_tokens: 32
+          stream: false
+          messages:
+            - role: user
+              content: "Reply with one word."
+    expect:
+      client_status: 200
+      client_body_kind: json
+      upstream_path: /v1/projects/my-gcp-project/locations/global/publishers/anthropic/models/claude-sonnet-4-5:rawPredict
+      upstream_body_kind: json
+      client_sse_events: []
+      upstream_sse_events: []
