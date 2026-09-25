@@ -3,13 +3,13 @@
 
 # `reasoning_effort_map`
 
-Rewrites `reasoning_effort` / `reasoning.effort` for configured clusters so clients can send effort values the backend rejects.
+Rewrites `reasoning_effort` / `reasoning.effort` for configured models so clients can send effort values the backend rejects.
 
 ## Configuration
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
-| `clusters` | string[] | yes | Router-selected clusters whose requests this filter rewrites. Requests routed to any other cluster pass through unchanged. Required and must be non-empty. |
+| `models` | string[] | yes | Requested model names whose bodies this filter rewrites (exact match on the body `model` field). Bodies naming any other model pass through unchanged. Required and must be non-empty. |
 | `values` | object<string, string> | no | Requested effort value -> replacement value. Defaults to `high -> xhigh`, `minimal -> low`. |
 | `max_body_bytes` | integer | no | Maximum request body size accepted by the filter. |
 
@@ -17,7 +17,7 @@ Rewrites `reasoning_effort` / `reasoning.effort` for configured clusters so clie
 
 ```yaml
 filter: reasoning_effort_map
-clusters: ["qwen-flash"]   # only requests routed here are rewritten
+models: ["Inferact/Qwen3.8-Flash-Next-NVFP4"]   # only these bodies are rewritten
 values:                    # defaults shown
   high: "xhigh"
   minimal: "low"
