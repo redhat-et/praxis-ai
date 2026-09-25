@@ -52,7 +52,7 @@ pub use content_normalize::ContentNormalizeFilter;
 pub use gcp::GcpAdcFilter;
 pub use guardrails::AiGuardrailsFilter;
 pub use identity_guard::IdentityHeaderGuardFilter;
-pub use inference::{LlmisvcModelProviderResolverFilter, ModelToHeaderFilter};
+pub use inference::{LlmisvcModelProviderResolverFilter, ModelToHeaderFilter, ModelToProviderFilter};
 pub use metering::ExternalMeteringFilter;
 pub use model_access::ModelAccessFilter;
 pub use model_catalog::ModelCatalogFilter;
