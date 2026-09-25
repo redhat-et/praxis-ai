@@ -16,26 +16,35 @@
 //! the Responses `reasoning.effort` field — using a configurable map
 //! (default: `high -> xhigh`, `minimal -> low`).
 //!
-//! Rewriting only applies to requests the router placed on one of the
-//! configured `clusters`, so providers with a wider vocabulary (e.g.
+//! Rewriting only applies to requests whose body `model` field names one
+//! of the configured `models`, so providers with a wider vocabulary (e.g.
 //! `gpt-*` models that legitimately accept `high`) pass through
-//! untouched. The `clusters` list is mandatory and must be non-empty:
-//! the filter refuses to start instead of silently rewriting every
-//! backend.
+//! untouched. The `models` list is mandatory and must be non-empty: the
+//! filter refuses to start instead of silently rewriting every backend.
+//!
+//! Gating is on the body's `model` field, not on the router's selected
+//! cluster, because that is the only scope a body-mutating filter can
+//! observe: when the chain buffers the request body (e.g. a `model_to_header`
+//! filter precedes the router), the protocol pre-reads the body and runs
+//! every filter's body hook in that pass, before any filter's header
+//! phase — so the cluster selection does not exist yet at mutation time.
+//! With catalog models routing one-to-one to clusters, a per-model list
+//! expresses exactly the cluster scoping, and a missing entry fails
+//! loudly (the backend 400s) instead of silently mis-rewriting.
 //!
 //! # YAML
 //!
 //! ```yaml
 //! filter: reasoning_effort_map
-//! clusters: ["qwen-flash"]   # only requests routed here are rewritten
+//! models: ["Inferact/Qwen3.8-Flash-Next-NVFP4"]   # only these bodies are rewritten
 //! values:                    # defaults shown
 //!   high: "xhigh"
 //!   minimal: "low"
 //! ```
 //!
-//! Place this filter **after** the `router` (the cluster decision must
-//! already exist) and **before** the `load_balancer` in any chain that
-//! can route to a backend with a restricted effort vocabulary.
+//! Place this filter **after** `content_normalize` (so the rewrite sees
+//! the normalized body) and **before** the `load_balancer` in any chain
+//! that can route to a backend with a restricted effort vocabulary.
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
@@ -80,10 +89,10 @@ fn default_effort_values() -> BTreeMap<String, String> {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReasoningEffortMapConfig {
-    /// Router-selected clusters whose requests this filter rewrites.
-    /// Requests routed to any other cluster pass through unchanged.
-    /// Required and must be non-empty.
-    clusters: Vec<String>,
+    /// Requested model names whose bodies this filter rewrites (exact
+    /// match on the body `model` field). Bodies naming any other model
+    /// pass through unchanged. Required and must be non-empty.
+    models: Vec<String>,
     /// Requested effort value -> replacement value. Defaults to
     /// `high -> xhigh`, `minimal -> low`.
     #[serde(default = "default_effort_values")]
@@ -94,10 +103,10 @@ struct ReasoningEffortMapConfig {
 }
 
 /// Rewrites `reasoning_effort` / `reasoning.effort` for configured
-/// clusters so clients can send effort values the backend rejects.
+/// models so clients can send effort values the backend rejects.
 pub struct ReasoningEffortMapFilter {
-    /// Router-selected clusters whose requests are rewritten.
-    clusters: Vec<String>,
+    /// Model names whose request bodies are rewritten.
+    models: Vec<String>,
     /// Effort value rewrites applied to matching requests.
     values: BTreeMap<String, String>,
     /// Maximum request body size accepted by the filter.
@@ -110,25 +119,18 @@ impl ReasoningEffortMapFilter {
     /// # Errors
     ///
     /// Returns [`FilterError`] if the YAML config is invalid or if
-    /// `clusters` is missing/empty — an unscoped rewrite would silently
+    /// `models` is missing/empty — an unscoped rewrite would silently
     /// change effort for backends that accept it.
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: ReasoningEffortMapConfig = parse_filter_config("reasoning_effort_map", config)?;
-        if cfg.clusters.is_empty() {
-            return Err("reasoning_effort_map: `clusters` must list at least one cluster".into());
+        if cfg.models.is_empty() {
+            return Err("reasoning_effort_map: `models` must list at least one model".into());
         }
         Ok(Box::new(Self {
-            clusters: cfg.clusters,
+            models: cfg.models,
             values: cfg.values,
             max_body_bytes: cfg.max_body_bytes,
         }))
-    }
-
-    /// True if the router selected one of this filter's clusters.
-    fn cluster_matches(&self, ctx: &HttpFilterContext<'_>) -> bool {
-        ctx.cluster
-            .as_deref()
-            .is_some_and(|c| self.clusters.iter().any(|s| s == c))
     }
 }
 
@@ -170,15 +172,11 @@ impl HttpFilter for ReasoningEffortMapFilter {
 
     async fn on_request_body(
         &self,
-        ctx: &mut HttpFilterContext<'_>,
+        _ctx: &mut HttpFilterContext<'_>,
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
         if !end_of_stream {
-            return Ok(FilterAction::Continue);
-        }
-
-        if !self.cluster_matches(ctx) {
             return Ok(FilterAction::Continue);
         }
 
@@ -191,6 +189,16 @@ impl HttpFilter for ReasoningEffortMapFilter {
             Err(_) => return Ok(FilterAction::Continue),
         };
 
+        // Gate on the body's own model — the only routing scope visible
+        // from a body hook (see module docs).
+        if !value
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(|m| self.models.iter().any(|s| s == m))
+        {
+            return Ok(FilterAction::Continue);
+        }
+
         // Chat-completions shape: top-level reasoning_effort string.
         let mut mutated = remap_field(&mut value, "reasoning_effort", &self.values);
         // Responses shape: reasoning.effort (only when reasoning is an
@@ -200,7 +208,7 @@ impl HttpFilter for ReasoningEffortMapFilter {
         }
 
         if mutated {
-            debug!("rewrote reasoning effort for a cluster with a restricted vocabulary");
+            debug!("rewrote reasoning effort for a backend with a restricted vocabulary");
             replace_json_body(body, &value, "reasoning_effort_map", "reasoning effort")
                 .map_err(|e| -> FilterError { format!("reasoning_effort_map: {e}").into() })?;
         }
