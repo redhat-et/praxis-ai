@@ -1213,6 +1213,7 @@ mod tests {
                 "chat_completions_to_bedrock_converse",
                 "messages_to_chat_completions",
                 "messages_native_passthrough",
+                "messages_to_vertex",
                 "responses_agentic_loop",
                 "responses_native_passthrough",
                 "openai_responses_to_chat_completions",
@@ -1325,6 +1326,7 @@ mod tests {
                 vec!["openai_chat_completions_to_anthropic_messages"],
                 vec!["openai_responses_to_chat_completions"],
                 vec!["responses_native_passthrough"],
+                vec!["messages_to_vertex"],
             ]
         );
         assert_eq!(
@@ -1429,11 +1431,12 @@ mod tests {
                 CoverageStatus::SyntheticOnly,
                 CoverageStatus::SyntheticOnly,
                 CoverageStatus::SyntheticOnly,
+                CoverageStatus::SyntheticOnly,
             ]
         );
-        assert_eq!(report.features_total, 95, "manifest feature inventory count");
-        assert_eq!(report.scenarios_total, 73, "manifest scenario inventory count");
-        assert_eq!(report.recordings_total, 78, "manifest recording inventory count");
+        assert_eq!(report.features_total, 96, "manifest feature inventory count");
+        assert_eq!(report.scenarios_total, 74, "manifest scenario inventory count");
+        assert_eq!(report.recordings_total, 79, "manifest recording inventory count");
         assert_eq!(
             scenarios.keys().collect::<Vec<_>>(),
             vec![
@@ -1461,6 +1464,7 @@ mod tests {
                 "messages/upstream-error",
                 "messages/upstream-error-stream",
                 "messages/upstream-error-unknown-type",
+                "messages/vertex-model-alias",
                 "openai_legacy/anthropic-json-sse-error",
                 "openai_legacy/anthropic-version-sampling",
                 "responses/agentic-deferred-mcp-connectors",
@@ -1512,7 +1516,7 @@ mod tests {
                 "vertex/invalid-content",
             ]
         );
-        assert_eq!(manifest.features.len(), 95, "manifest must declare every feature");
+        assert_eq!(manifest.features.len(), 96, "manifest must declare every feature");
         assert_eq!(manifest.version, 1);
         assert_eq!(
             manifest
@@ -1949,6 +1953,10 @@ mod tests {
                     &"responses.request.object_document_input".to_owned(),
                     &vec!["responses/object-document-input".to_owned()]
                 ),
+                (
+                    &"messages.vertex.model_alias".to_owned(),
+                    &vec!["messages/vertex-model-alias".to_owned()]
+                ),
             ]
         );
         for feature in &manifest.features[0..2] {
@@ -2119,7 +2127,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("vllm", CoverageStatus::LiveCovered)],
         );
-        for feature in &manifest.features[62..95] {
+        for feature in &manifest.features[62..96] {
             assert_eq!(
                 feature
                     .providers
@@ -2266,6 +2274,46 @@ mod tests {
             value["model"], "claude-sonnet-4-5",
             "model_provider.turns[0].request.body.model"
         );
+
+        let vertex_alias = InferenceScenario::load(&root.join("scenarios/messages/vertex-model-alias.yaml")).unwrap();
+        assert_eq!(vertex_alias.id, "messages/vertex-model-alias", "vertex_alias.id");
+        assert_eq!(
+            vertex_alias.description,
+            "Stable Anthropic model ID maps to Vertex and is restored in the client response.",
+            "vertex_alias.description"
+        );
+        assert_eq!(
+            vertex_alias.protocol,
+            InferenceProtocol::AnthropicMessages,
+            "vertex_alias.protocol"
+        );
+        assert_eq!(
+            vertex_alias.example_config, "vertex-anthropic.yaml",
+            "vertex_alias.example_config"
+        );
+        assert_eq!(
+            vertex_alias.upstream_authority, "127.0.0.1:3000",
+            "vertex_alias.upstream_authority"
+        );
+        assert_eq!(
+            vertex_alias.features,
+            ["messages.vertex.model_alias"],
+            "vertex_alias.features"
+        );
+        assert_eq!(vertex_alias.turns.len(), 1, "vertex_alias.turns.len()");
+        assert_eq!(
+            vertex_alias.turns[0].request.path, "/v1/messages",
+            "vertex_alias.turns[0].request.path"
+        );
+        assert_eq!(
+            vertex_alias.turns[0].expect.upstream_path,
+            "/v1/projects/my-gcp-project/locations/global/publishers/anthropic/models/claude-sonnet-4-5:rawPredict",
+            "vertex_alias.turns[0].expect.upstream_path"
+        );
+        let RecordedBody::Json { value } = &vertex_alias.turns[0].request.body else {
+            panic!("Vertex alias request body must be JSON");
+        };
+        assert_eq!(value["model"], "claude-sonnet-4-5", "vertex_alias request model");
 
         let responses_nonstream =
             InferenceScenario::load(&root.join("scenarios/responses/native-basic-nonstream.yaml")).unwrap();

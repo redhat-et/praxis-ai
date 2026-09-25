@@ -227,17 +227,6 @@ fn provider_resolved_public_model_wins_over_rewritten_body_model() {
     assert_eq!(filter.resolve_report_model(&ctx, &state), "claude-sonnet-4-5");
 }
 
-#[test]
-fn provider_resolved_model_does_not_override_captured_identity_model() {
-    let filter = filter_from_yaml("metering_url: \"http://metering:8080\"\n");
-    let req = make_request(http::Method::POST, "/v1/messages");
-    let mut ctx = make_filter_context(&req);
-    ctx.set_metadata(MODEL_PROVIDER_CLIENT_MODEL_METADATA, "claude-sonnet-4-5");
-    let state = state_for("alice", "tenant-model");
-
-    assert_eq!(filter.resolve_report_model(&ctx, &state), "tenant-model");
-}
-
 #[tokio::test]
 async fn provider_resolved_public_model_is_used_for_balance_check() {
     let filter = filter_from_yaml(

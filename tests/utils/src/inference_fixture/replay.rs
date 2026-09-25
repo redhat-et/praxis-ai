@@ -429,6 +429,7 @@ fn validate_replay_filters(config: &Config) -> Result<(), FixtureError> {
 /// sanitization, gated by `filter_is_replay_contained` plus scenario
 /// request inspection in `validate_mcp_resolve_replay_requests`.
 const REPLAY_CONTAINED_FILTERS: &[&str] = &[
+    "vertex",
     "ai_operation",
     "openai_agentic_loop",
     "anthropic_messages_request",

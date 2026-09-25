@@ -1,10 +1,8 @@
-# Vertex AI dialect translation (Anthropic Messages -> rawPredict)
+# Stable Vertex model ID (Anthropic Messages -> rawPredict)
 #
-# Rewrites Anthropic Messages requests into Vertex AI rawPredict form:
-# the body model moves into the URL path (:rawPredict /
-# :streamRawPredict), anthropic_version is injected, and responses are
-# translated back (user-facing model id restored, Google error
-# envelopes mapped to Anthropic error types).
+# Maps the public model ID `claude-sonnet-4-5` to the Vertex target, then
+# rewrites Anthropic Messages requests into Vertex AI rawPredict form. The
+# response restores the public ID, including for streamed message_start events.
 #
 # Production note: replace the static credential_injection below with
 # the experimental `gcp_adc` filter (source: key_file) so the gateway
@@ -27,16 +25,26 @@ listeners:
 filter_chains:
   - name: vertex
     filters:
-      - filter: router
-        routes:
-          - path_prefix: "/"
-            cluster: vertex
+      - filter: model_to_header
+        header: X-Model
+      - filter: model_to_provider
+        models:
+          - model: claude-sonnet-4-5
+            provider: vertex
+            target_model: vertex/claude-sonnet-4-5
+            paths: [/v1/messages, /v1/messages/count_tokens]
       - filter: vertex
         project: my-gcp-project
         # location: global          # default; use a regional location for data residency
         # model_prefix: "vertex/"   # user-facing ids are stripped to publisher ids
         # model_pin: "@20250929"    # pin snapshots so upgrades are deliberate
         # beta_allowlist: [context-1m-2025-08-07]
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            headers:
+              x-praxis-ai-provider: vertex
+            cluster: vertex
       - filter: credential_injection
         clusters:
           - name: vertex
