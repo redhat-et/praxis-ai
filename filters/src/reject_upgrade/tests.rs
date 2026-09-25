@@ -104,6 +104,10 @@ async fn rejects_websocket_upgrade_by_default() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "assert the rejection body and headers as a single contract"
+)]
 async fn rejection_body_is_openai_shaped_json() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(r#"message: "no websockets here""#).unwrap();
     let filter = RejectUpgradeFilter::from_config(&yaml).unwrap();
@@ -126,9 +130,19 @@ async fn rejection_body_is_openai_shaped_json() {
     );
     let body = rejection.body.expect("rejection must carry a body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("body must be valid JSON");
-    assert_eq!(json["error"]["message"], "no websockets here");
-    assert_eq!(json["error"]["type"], "invalid_request_error");
-    assert_eq!(json["error"]["code"], "upgrade_not_supported");
+    let error = json.get("error").and_then(serde_json::Value::as_object).unwrap();
+    assert_eq!(
+        error.get("message").and_then(serde_json::Value::as_str),
+        Some("no websockets here")
+    );
+    assert_eq!(
+        error.get("type").and_then(serde_json::Value::as_str),
+        Some("invalid_request_error")
+    );
+    assert_eq!(
+        error.get("code").and_then(serde_json::Value::as_str),
+        Some("upgrade_not_supported")
+    );
 }
 
 #[tokio::test]
@@ -179,13 +193,7 @@ async fn passes_through_when_no_upgrade_header() {
 
 #[tokio::test]
 async fn allow_list_ignores_non_matching_token() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str(
-        r#"
-protocols:
-  - websocket
-"#,
-    )
-    .unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str("protocols:\n  - websocket\n").unwrap();
     let filter = RejectUpgradeFilter::from_config(&yaml).unwrap();
 
     let mut req = make_request(Method::GET, "/some/path");
@@ -202,13 +210,7 @@ protocols:
 
 #[tokio::test]
 async fn allow_list_matches_token_with_version_suffix() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str(
-        r#"
-protocols:
-  - websocket
-"#,
-    )
-    .unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str("protocols:\n  - websocket\n").unwrap();
     let filter = RejectUpgradeFilter::from_config(&yaml).unwrap();
 
     let mut req = make_request(Method::GET, "/v1/responses");
