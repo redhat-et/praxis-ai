@@ -65,12 +65,8 @@ http-callout-filter = ["experimental", "dep:serde_json_path"]
 azure-ad-filter = ["experimental"]
 # Experimental: the gcp_adc (Application Default Credentials) upstream
 # authentication filter. Work in progress; the config surface may change.
-# Activates the `experimental` marker. `openssl` signs the service-account
-# `JWT` assertion for `source: key_file` in the system library.
-gcp-adc-filter = ["experimental", "dep:openssl"]
-# Experimental: Anthropic Messages to Vertex AI rawPredict translation. Work
-# in progress; the config surface may change. Activates the experimental marker.
-vertex-anthropic-filter = ["experimental", "praxis-ai-apis/vertex-anthropic"]
+# Activates the `experimental` marker.
+gcp-adc-filter = ["experimental"]
 # Experimental: the token_rate_limit filter. Its parent proposal
 # (00121_token-rate-limiting in praxis-proxy/enhancements) is not yet
 # `accepted`, and open design questions remain (bucket-keying strategy,
@@ -121,6 +117,7 @@ praxis-filter = { workspace = true, features = ["chain-binding"] }
 praxis-tls = { workspace = true }
 redis = { workspace = true, optional = true }
 rand = { workspace = true }
+reqwest.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_json_canonicalizer = { workspace = true }
