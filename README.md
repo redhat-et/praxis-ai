@@ -34,6 +34,9 @@ application.
 See the [complete feature overview](docs/features.md) and
 [filter reference](docs/filters/README.md) for the full list.
 
+For Red Hat downstream-only changes, EnMaaS compatibility work, and the
+upstream-porting ledger, see [DOWNSTREAM.md](DOWNSTREAM.md).
+
 ## Architecture
 
 Clients keep their provider-native protocols while Praxis AI classifies,
