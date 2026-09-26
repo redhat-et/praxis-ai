@@ -43,6 +43,21 @@ identity_header_prefix: "x-custom-"
 }
 
 #[test]
+fn config_loads_internal_auth_token_from_file() {
+    let path = std::env::temp_dir().join(format!("praxis-metering-token-{}", std::process::id()));
+    fs::write(&path, "metering-secret\n").unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        "metering_url: http://metering:8080\ninternal_auth_file: {:?}\n",
+        path.to_string_lossy()
+    ))
+    .unwrap();
+
+    let filter = build_filter(&yaml).unwrap();
+    assert_eq!(filter.internal_auth_token.as_ref().unwrap().to_str().unwrap(), "Bearer metering-secret");
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn config_with_fallbacks_parses() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"

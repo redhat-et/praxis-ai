@@ -34,6 +34,7 @@ const DEFAULT_IDENTITY_METADATA_NAMESPACE: &str = "identity";
 /// fail_open: true
 /// identity_header_prefix: "x-tenant-"
 /// identity_metadata_namespace: "identity"
+/// internal_auth_file: "/etc/praxis-secrets/metering-token"
 /// default_username: "anonymous"
 /// default_model: "unknown"
 /// ```
@@ -77,6 +78,12 @@ pub(super) struct ExternalMeteringConfig {
     /// `metadata_namespace` setting when both run in one pipeline.
     #[serde(default = "default_identity_metadata_namespace")]
     pub identity_metadata_namespace: String,
+
+    /// Optional file containing the bearer token used to authenticate
+    /// gateway-to-metering subrequests. The file is read at pipeline build
+    /// time and the token is never logged or put in the request body.
+    #[serde(default)]
+    pub internal_auth_file: Option<String>,
 
     /// Fallback username when no identity header is present.
     /// If set, requests without `{prefix}username` are still metered

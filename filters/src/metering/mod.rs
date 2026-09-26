@@ -27,11 +27,11 @@ mod config;
 )]
 mod tests;
 
-use std::time::Duration;
+use std::{fs, time::Duration};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use http::header::HeaderName;
+use http::header::{AUTHORIZATION, HeaderName, HeaderValue};
 use metrics::counter;
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use praxis_ai_apis::{
@@ -95,6 +95,9 @@ const MAX_CALLOUT_RESPONSE_BYTES: usize = 64 * 1024;
 /// created by [`ExternalMeteringFilter::from_config`].
 const PRIVATE_POOL_SIZE: usize = 4;
 
+/// Header used by the metering service's gateway-to-service authentication.
+const INTERNAL_AUTH_HEADER: HeaderName = AUTHORIZATION;
+
 /// Characters escaped when interpolating values into the balance check URL.
 ///
 /// Deliberately narrower than [`percent_encoding::NON_ALPHANUMERIC`]: feature
@@ -148,6 +151,7 @@ const STATUS_METERING_UNAVAILABLE: u16 = 503;
 /// fail_open: true
 /// identity_header_prefix: "x-tenant-"
 /// identity_metadata_namespace: "identity"
+/// internal_auth_file: "/etc/praxis-secrets/metering-token"
 /// default_username: "anonymous"
 /// default_model: "unknown"
 /// ```
@@ -189,6 +193,10 @@ pub struct ExternalMeteringFilter {
 
     /// HTTP timeout applied to each metering call.
     timeout: Duration,
+
+    /// Optional bearer credential for gateway-to-metering calls, loaded from
+    /// a projected Secret file at pipeline construction time.
+    internal_auth_token: Option<HeaderValue>,
 }
 
 impl ExternalMeteringFilter {
@@ -227,6 +235,11 @@ impl ExternalMeteringFilter {
     fn build(config: &serde_yaml::Value, subrequest_client: SubRequestClient) -> Result<Self, FilterError> {
         let cfg: ExternalMeteringConfig = parse_filter_config("external_metering", config)?;
         validate_config(&cfg)?;
+        let internal_auth_token = cfg
+            .internal_auth_file
+            .as_deref()
+            .map(read_internal_auth_token)
+            .transpose()?;
 
         Ok(Self {
             address_policy: AddressPolicy::from_allow_private(cfg.allow_private_endpoint),
@@ -240,6 +253,7 @@ impl ExternalMeteringFilter {
             source: cfg.source,
             subrequest_client,
             timeout: Duration::from_secs(cfg.timeout_seconds),
+            internal_auth_token,
         })
     }
 
@@ -255,7 +269,7 @@ impl ExternalMeteringFilter {
         let request = SubRequest {
             method: http::Method::GET,
             uri: http::Uri::default(),
-            headers: http::HeaderMap::new(),
+            headers: internal_auth_headers(self.internal_auth_token.as_ref()),
             body: Bytes::new(),
         };
 
@@ -333,6 +347,7 @@ impl ExternalMeteringFilter {
             self.timeout,
             self.address_policy,
             &event,
+            self.internal_auth_token.clone(),
         );
     }
 }
@@ -691,7 +706,7 @@ fn strip_identity_headers(ctx: &mut HttpFilterContext<'_>, prefix_lower: &str) {
 /// uncompressed body: `token_count` parses the response inline and cannot read
 /// usage out of a compressed stream.
 fn strip_client_credentials(ctx: &mut HttpFilterContext<'_>) {
-    ctx.request_headers_to_remove.push(http::header::AUTHORIZATION);
+    ctx.request_headers_to_remove.push(AUTHORIZATION);
     ctx.request_headers_to_remove.push(http::header::ACCEPT_ENCODING);
     ctx.request_headers_to_remove.push(HeaderName::from_static("x-api-key"));
 }
@@ -772,6 +787,7 @@ fn spawn_usage_report(
     timeout: Duration,
     address_policy: AddressPolicy,
     event: &serde_json::Value,
+    internal_auth_token: Option<HeaderValue>,
 ) {
     let url = format!("{}/api/v1/events", metering_url.trim_end_matches('/'));
 
@@ -787,8 +803,11 @@ fn spawn_usage_report(
         let mut headers = http::HeaderMap::new();
         headers.insert(
             http::header::CONTENT_TYPE,
-            http::HeaderValue::from_static("application/json"),
+            HeaderValue::from_static("application/json"),
         );
+        if let Some(token) = internal_auth_token {
+            headers.insert(INTERNAL_AUTH_HEADER.clone(), token);
+        }
         let request = SubRequest {
             method: http::Method::POST,
             uri: http::Uri::default(),
@@ -808,6 +827,26 @@ fn spawn_usage_report(
             .await,
         );
     });
+}
+
+/// Read a projected internal bearer token without exposing its value in
+/// configuration errors or logs.
+fn read_internal_auth_token(path: &str) -> Result<HeaderValue, FilterError> {
+    let token = fs::read_to_string(path)
+        .map_err(|_| FilterError::from("external_metering: internal_auth_file could not be read"))?;
+    let value = format!("Bearer {}", token.trim());
+    if value == "Bearer" {
+        return Err("external_metering: internal_auth_file is empty".into());
+    }
+    HeaderValue::from_str(&value).map_err(|_| "external_metering: internal_auth_file is invalid".into())
+}
+
+fn internal_auth_headers(token: Option<&HeaderValue>) -> http::HeaderMap {
+    let mut headers = http::HeaderMap::new();
+    if let Some(token) = token {
+        headers.insert(INTERNAL_AUTH_HEADER.clone(), token.clone());
+    }
+    headers
 }
 
 /// Log the outcome of a usage report delivery and count failures.
