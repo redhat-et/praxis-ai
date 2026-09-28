@@ -3,6 +3,11 @@
 
 use super::*;
 use crate::test_utils::{make_filter_context, make_request};
+use serde_json::json;
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{header, method, path, query_param},
+};
 
 /// Build the concrete filter with a private test client.
 fn build_filter(yaml: &serde_yaml::Value) -> Result<ExternalMeteringFilter, FilterError> {
@@ -53,7 +58,10 @@ fn config_loads_internal_auth_token_from_file() {
     .unwrap();
 
     let filter = build_filter(&yaml).unwrap();
-    assert_eq!(filter.internal_auth_token.as_ref().unwrap().to_str().unwrap(), "Bearer metering-secret");
+    assert_eq!(
+        filter.internal_auth_token.as_ref().unwrap().to_str().unwrap(),
+        "Bearer metering-secret"
+    );
     fs::remove_file(path).unwrap();
 }
 
@@ -76,6 +84,69 @@ fn internal_auth_headers_build_bearer_header() {
     let headers = internal_auth_headers(Some(&token));
     assert_eq!(headers.get("authorization").unwrap(), "Bearer metering-secret");
     fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+#[expect(clippy::too_many_lines, reason = "mock setup exercises both metering callout paths")]
+async fn internal_auth_is_sent_on_entitlement_and_event_subrequests() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/customers/alice/entitlements/inference-tokens/value"))
+        .and(query_param("model", "gpt-4"))
+        .and(header("authorization", "Bearer metering-secret"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"hasAccess": true})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/events"))
+        .and(header("authorization", "Bearer metering-secret"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let token_path = std::env::temp_dir().join(format!("praxis-metering-live-token-{}", std::process::id()));
+    fs::write(&token_path, "metering-secret\n").unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        "metering_url: {}\nallow_private_endpoint: true\ninternal_auth_file: {:?}\n",
+        server.uri(),
+        token_path.to_string_lossy()
+    ))
+    .unwrap();
+    let filter = build_filter(&yaml).unwrap();
+    let state = state_for("alice", "gpt-4");
+    assert!(matches!(filter.check_balance(&state).await, FilterAction::Continue));
+
+    let tokens = TokenCounts {
+        input: 2,
+        output: 1,
+        total: 3,
+        cache_read: 0,
+        cache_write: 0,
+    };
+    let event = build_usage_event(&event_ctx("event-1", &state), &tokens);
+    spawn_usage_report(
+        filter.subrequest_client.clone(),
+        MeteringReportConfig {
+            url: format!("{}/api/v1/events", server.uri()),
+            timeout: filter.timeout,
+            address_policy: filter.address_policy,
+            internal_auth_token: filter.internal_auth_token.clone(),
+        },
+        &event,
+    );
+
+    for _ in 0..50 {
+        if server.received_requests().await.unwrap().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2, "both metering paths should be called");
+    for request in requests {
+        assert_eq!(request.headers.get("authorization").unwrap(), "Bearer metering-secret");
+    }
+    fs::remove_file(token_path).unwrap();
 }
 
 #[test]
