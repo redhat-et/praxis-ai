@@ -343,11 +343,13 @@ impl ExternalMeteringFilter {
 
         spawn_usage_report(
             self.subrequest_client.clone(),
-            &self.metering_url,
-            self.timeout,
-            self.address_policy,
+            MeteringReportConfig {
+                url: format!("{}/api/v1/events", self.metering_url.trim_end_matches('/')),
+                timeout: self.timeout,
+                address_policy: self.address_policy,
+                internal_auth_token: self.internal_auth_token.clone(),
+            },
             &event,
-            self.internal_auth_token.clone(),
         );
     }
 }
@@ -783,14 +785,9 @@ fn reject_unavailable() -> FilterAction {
 )]
 fn spawn_usage_report(
     client: SubRequestClient,
-    metering_url: &str,
-    timeout: Duration,
-    address_policy: AddressPolicy,
+    report: MeteringReportConfig,
     event: &serde_json::Value,
-    internal_auth_token: Option<HeaderValue>,
 ) {
-    let url = format!("{}/api/v1/events", metering_url.trim_end_matches('/'));
-
     let body = match serde_json::to_vec(event) {
         Ok(b) => b,
         Err(e) => {
@@ -805,7 +802,7 @@ fn spawn_usage_report(
             http::header::CONTENT_TYPE,
             HeaderValue::from_static("application/json"),
         );
-        if let Some(token) = internal_auth_token {
+        if let Some(token) = report.internal_auth_token {
             headers.insert(INTERNAL_AUTH_HEADER.clone(), token);
         }
         let request = SubRequest {
@@ -818,11 +815,11 @@ fn spawn_usage_report(
         report_delivery(
             subrequest::execute_url(
                 &client,
-                &url,
+                &report.url,
                 request,
                 MAX_CALLOUT_RESPONSE_BYTES,
-                timeout,
-                address_policy,
+                report.timeout,
+                report.address_policy,
             )
             .await,
         );
@@ -832,21 +829,41 @@ fn spawn_usage_report(
 /// Read a projected internal bearer token without exposing its value in
 /// configuration errors or logs.
 fn read_internal_auth_token(path: &str) -> Result<HeaderValue, FilterError> {
-    let token = fs::read_to_string(path)
-        .map_err(|_| FilterError::from("external_metering: internal_auth_file could not be read"))?;
-    let value = format!("Bearer {}", token.trim());
-    if value == "Bearer" {
+    let token = fs::read_to_string(path).map_err(|error| {
+        FilterError::from(format!("external_metering: internal_auth_file could not be read: {error}"))
+    })?;
+    let token = token.trim();
+    if token.is_empty() {
         return Err("external_metering: internal_auth_file is empty".into());
     }
-    HeaderValue::from_str(&value).map_err(|_| "external_metering: internal_auth_file is invalid".into())
+    if token.chars().any(char::is_whitespace) {
+        return Err("external_metering: internal_auth_file contains whitespace".into());
+    }
+    let value = format!("Bearer {token}");
+    HeaderValue::from_str(&value).map_err(|error| {
+        FilterError::from(format!("external_metering: internal_auth_file is invalid: {error}"))
+    })
 }
 
+/// Build the shared Authorization header used by entitlement and event calls.
 fn internal_auth_headers(token: Option<&HeaderValue>) -> http::HeaderMap {
     let mut headers = http::HeaderMap::new();
     if let Some(token) = token {
         headers.insert(INTERNAL_AUTH_HEADER.clone(), token.clone());
     }
     headers
+}
+
+/// Transport settings captured for one asynchronous usage report.
+struct MeteringReportConfig {
+    /// Fully qualified event endpoint.
+    url: String,
+    /// Request timeout.
+    timeout: Duration,
+    /// Private-address policy for the subrequest.
+    address_policy: AddressPolicy,
+    /// Optional bearer token for the internal metering service.
+    internal_auth_token: Option<HeaderValue>,
 }
 
 /// Log the outcome of a usage report delivery and count failures.

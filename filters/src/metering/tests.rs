@@ -58,6 +58,27 @@ fn config_loads_internal_auth_token_from_file() {
 }
 
 #[test]
+fn internal_auth_token_rejects_empty_and_whitespace_values() {
+    for (suffix, content) in [("empty", ""), ("whitespace", "token with-space")] {
+        let path = std::env::temp_dir().join(format!("praxis-metering-token-{suffix}-{}", std::process::id()));
+        fs::write(&path, content).unwrap();
+        let result = read_internal_auth_token(path.to_str().unwrap());
+        assert!(result.is_err(), "{suffix} token must fail closed");
+        fs::remove_file(path).unwrap();
+    }
+}
+
+#[test]
+fn internal_auth_headers_build_bearer_header() {
+    let path = std::env::temp_dir().join(format!("praxis-metering-token-header-{}", std::process::id()));
+    fs::write(&path, "metering-secret").unwrap();
+    let token = read_internal_auth_token(path.to_str().unwrap()).unwrap();
+    let headers = internal_auth_headers(Some(&token));
+    assert_eq!(headers.get("authorization").unwrap(), "Bearer metering-secret");
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn config_with_fallbacks_parses() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
