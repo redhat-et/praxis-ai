@@ -35,6 +35,7 @@ feature_key: "custom-tokens"
 source: "my-gateway"
 fail_open: false
 identity_header_prefix: "x-custom-"
+model_policy_check: true
 "#,
     )
     .unwrap();
@@ -56,6 +57,22 @@ default_model: "unknown"
 
     assert_eq!(filter.default_username.as_deref(), Some("anonymous"));
     assert_eq!(filter.default_model.as_deref(), Some("unknown"));
+}
+
+#[test]
+fn model_policy_check_buffers_only_when_enabled() {
+    let stream = build_filter(&serde_yaml::from_str("metering_url: http://metering:8080\n").unwrap()).unwrap();
+    assert_eq!(stream.request_body_mode(), BodyMode::Stream);
+
+    let buffered =
+        build_filter(&serde_yaml::from_str("metering_url: http://metering:8080\nmodel_policy_check: true\n").unwrap())
+            .unwrap();
+    assert_eq!(
+        buffered.request_body_mode(),
+        BodyMode::StreamBuffer {
+            max_bytes: Some(MODEL_POLICY_BODY_BUFFER_BYTES),
+        }
+    );
 }
 
 #[test]
@@ -181,6 +198,69 @@ async fn provider_resolved_public_model_is_used_for_balance_check() {
     assert_eq!(state.model, "claude-sonnet-4-5");
 }
 
+#[tokio::test]
+async fn body_promoted_x_model_is_used_for_balance_check() {
+    let filter = filter_from_yaml("metering_url: \"http://127.0.0.1:1\"\ndefault_username: \"alice\"\n");
+    let req = make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = make_filter_context(&req);
+    ctx.request_headers_to_set.push((
+        HeaderName::from_static("x-model"),
+        http::HeaderValue::from_static("gpt-5.6-luna"),
+    ));
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue));
+    let state = ctx
+        .filter_state
+        .values()
+        .find_map(|value| value.downcast_ref::<MeteringState>())
+        .expect("on_request stores metering state");
+    assert_eq!(state.model, "gpt-5.6-luna");
+    assert!(
+        build_balance_url("http://metering:8080", "alice", "inference-tokens", &state.model)
+            .contains("model=gpt-5.6-luna")
+    );
+}
+
+#[tokio::test]
+async fn buffered_json_model_is_used_when_model_policy_check_is_enabled() {
+    let filter = filter_from_yaml(
+        "metering_url: \"http://127.0.0.1:1\"\ndefault_username: \"alice\"\nmodel_policy_check: true\n",
+    );
+    let req = make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = make_filter_context(&req);
+    ctx.buffered_request_body = Some(Bytes::from_static(br#"{"model":"model-from-body","messages":[]}"#));
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue));
+    let state = ctx
+        .filter_state
+        .values()
+        .find_map(|value| value.downcast_ref::<MeteringState>())
+        .expect("on_request stores metering state");
+    assert_eq!(state.model, "model-from-body");
+}
+
+#[tokio::test]
+async fn raw_client_x_model_is_not_trusted_for_balance_check() {
+    let filter = filter_from_yaml("metering_url: \"http://127.0.0.1:1\"\ndefault_username: \"alice\"\n");
+    let mut req = make_request(http::Method::POST, "/v1/chat/completions");
+    req.headers.insert("x-model", "spoofed-model".parse().unwrap());
+    let mut ctx = make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue));
+    let state = ctx
+        .filter_state
+        .values()
+        .find_map(|value| value.downcast_ref::<MeteringState>())
+        .expect("on_request stores metering state");
+    assert!(
+        state.model.is_empty(),
+        "raw client x-model must not select policy model"
+    );
+}
+
 #[test]
 fn empty_model_without_default_stays_empty() {
     let filter = filter_from_yaml("metering_url: \"http://metering:8080\"\n");
@@ -284,6 +364,15 @@ fn balance_response_no_access_rejects() {
     let body = br#"{"hasAccess": false, "balance": 0.0, "usage": 10000.0}"#;
     let action = parse_balance_result(body, true);
     assert!(matches!(action, FilterAction::Reject(_)));
+}
+
+#[test]
+fn model_allowlist_denial_is_forbidden_not_quota_exhausted() {
+    let body = br#"{"hasAccess": false, "modelAllowed": false}"#;
+    let FilterAction::Reject(rejection) = parse_balance_result(body, true) else {
+        panic!("disallowed model should reject even with fail-open enabled")
+    };
+    assert_eq!(rejection.status, http::StatusCode::FORBIDDEN.as_u16());
 }
 
 #[test]

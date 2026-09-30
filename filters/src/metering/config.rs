@@ -36,6 +36,7 @@ const DEFAULT_IDENTITY_METADATA_NAMESPACE: &str = "identity";
 /// identity_metadata_namespace: "identity"
 /// default_username: "anonymous"
 /// default_model: "unknown"
+/// model_policy_check: false
 /// ```
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -87,6 +88,12 @@ pub(super) struct ExternalMeteringConfig {
     /// Fallback model name when no identity model header is present.
     #[serde(default)]
     pub default_model: Option<String>,
+
+    /// Buffer the request body before the entitlement check so the public
+    /// model ID can be included in the preflight. Enable when the metering
+    /// service enforces per-user model allowlists.
+    #[serde(default)]
+    pub model_policy_check: bool,
 }
 
 /// Validate config at construction time.

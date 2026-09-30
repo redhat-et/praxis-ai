@@ -5,7 +5,9 @@
 
 use std::collections::HashMap;
 
-use praxis_test_utils::{RoutedBackend, free_port, http_send, parse_body, parse_status, start_header_echo_backend};
+use praxis_test_utils::{
+    RoutedBackend, StatefulCapturingBackend, free_port, http_send, parse_body, parse_status, start_header_echo_backend,
+};
 
 // -----------------------------------------------------------------------------
 // Config Parsing
@@ -56,6 +58,46 @@ fn external_metering_allows_request_when_balance_available() {
     );
 
     assert_eq!(parse_status(&raw), 200, "should proxy request when balance available");
+}
+
+#[test]
+fn external_metering_sends_body_model_to_entitlement_preflight() {
+    let backend_guard = start_header_echo_backend();
+    let backend_port = backend_guard.port();
+    let proxy_port = free_port();
+    let balance_body = r#"{"hasAccess": true, "modelAllowed": true}"#;
+    let metering =
+        StatefulCapturingBackend::new(vec![(200, balance_body.into()), (204, String::new())]).start_with_shutdown();
+
+    let config = super::load_example_config(
+        "external-metering.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3000", backend_port), ("127.0.0.1:9090", metering.port())]),
+    );
+    let proxy = praxis_test_utils::start_proxy(&config);
+    let body = r#"{"model":"gpt-4.2-test","messages":[{"role":"user","content":"hi"}]}"#;
+    let request = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         x-tenant-username: alice\r\n\
+         Connection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let raw = http_send(proxy.addr(), &request);
+
+    assert_eq!(parse_status(&raw), 200, "allowed body model should reach upstream");
+    let calls = metering.requests();
+    let balance = calls
+        .iter()
+        .find(|call| call.method == "GET")
+        .expect("entitlement preflight should be sent");
+    assert_eq!(
+        balance.uri,
+        "/api/v1/customers/alice/entitlements/inference-tokens/value?model=gpt-4.2-test"
+    );
 }
 
 // -----------------------------------------------------------------------------

@@ -14,7 +14,9 @@
 #     -H "x-tenant-subscription: sub-42" \
 #     -d '{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}'
 #
-# Pipeline ordering matters: external_metering is declared before
+# model_to_header promotes the request body's public model ID to X-Model
+# during pre-read so the entitlement preflight can apply per-user model
+# allowlists as well as quotas. external_metering is declared before
 # token_count so that response hooks (which run in reverse order)
 # execute token_count first, writing token.input / token.output /
 # token.total to filter_metadata, then external_metering reads them
@@ -35,6 +37,8 @@ listeners:
 filter_chains:
   - name: main
     filters:
+      - filter: model_to_header
+
       - filter: router
         routes:
           - path_prefix: "/"
@@ -58,6 +62,7 @@ filter_chains:
         # requests carrying no identity header are not metered at all.
         # default_username: "anonymous"
         # default_model: "unknown"
+        model_policy_check: true
 
       - filter: token_count
         provider: openai

@@ -91,6 +91,11 @@ const METRIC_REPORT_FAILURES: &str = "praxis_ai_metering_report_failures_total";
 /// anything larger indicates a misbehaving service and is cut off.
 const MAX_CALLOUT_RESPONSE_BYTES: usize = 64 * 1024;
 
+/// Maximum request body pre-read when an operator opts into per-user model
+/// allowlist checks. EnMaaS model-access pipelines already buffer up to this
+/// bound for body-based model selection.
+const MODEL_POLICY_BODY_BUFFER_BYTES: usize = 32 * 1024 * 1024;
+
 /// Keepalive pool size for the private per-filter sub-request connector
 /// created by [`ExternalMeteringFilter::from_config`].
 const PRIVATE_POOL_SIZE: usize = 4;
@@ -150,6 +155,7 @@ const STATUS_METERING_UNAVAILABLE: u16 = 503;
 /// identity_metadata_namespace: "identity"
 /// default_username: "anonymous"
 /// default_model: "unknown"
+/// model_policy_check: false
 /// ```
 pub struct ExternalMeteringFilter {
     /// Connect-time policy for the metering endpoint. Rejects non-public
@@ -159,6 +165,10 @@ pub struct ExternalMeteringFilter {
     /// Model name reported when neither the identity header nor the request
     /// body reveals one.
     default_model: Option<String>,
+
+    /// Whether to pre-read request JSON so the entitlement check sees the
+    /// public model before forwarding the body upstream.
+    model_policy_check: bool,
 
     /// Username reported when no identity header is present. When unset,
     /// unidentified requests are not metered at all.
@@ -231,6 +241,7 @@ impl ExternalMeteringFilter {
         Ok(Self {
             address_policy: AddressPolicy::from_allow_private(cfg.allow_private_endpoint),
             default_model: cfg.default_model,
+            model_policy_check: cfg.model_policy_check,
             default_username: cfg.default_username,
             fail_open: cfg.fail_open,
             feature_key: cfg.feature_key,
@@ -350,6 +361,29 @@ impl HttpFilter for ExternalMeteringFilter {
         {
             state.model = model.to_owned();
         }
+        if state.model.is_empty()
+            && self.model_policy_check
+            && let Some(model) = ctx
+                .buffered_request_body
+                .as_ref()
+                .and_then(|body| extract_model_from_bytes(body))
+        {
+            state.model = model;
+        }
+        // `model_to_header` promotes the body model to a pending X-Model
+        // mutation during pre-read. Read that trusted pending value here so
+        // the entitlement subrequest can enforce per-user model allowlists
+        // before the inference body is released upstream. Never fall back to
+        // the raw client-supplied X-Model header.
+        if state.model.is_empty()
+            && let Ok(praxis_filter::PendingHeaderResult::Value(model)) =
+                ctx.pending_header_value(&HeaderName::from_static("x-model"))
+        {
+            let model = model.trim();
+            if !model.is_empty() {
+                state.model = model.to_owned();
+            }
+        }
 
         if state.username.is_empty() {
             let Some(fallback) = self.default_username.as_ref() else {
@@ -375,7 +409,13 @@ impl HttpFilter for ExternalMeteringFilter {
     }
 
     fn request_body_mode(&self) -> BodyMode {
-        BodyMode::Stream
+        if self.model_policy_check {
+            BodyMode::StreamBuffer {
+                max_bytes: Some(MODEL_POLICY_BODY_BUFFER_BYTES),
+            }
+        } else {
+            BodyMode::Stream
+        }
     }
 
     async fn on_request_body(
@@ -535,6 +575,10 @@ struct EventContext<'a> {
 struct BalanceResponse {
     /// Whether the tenant may spend more tokens.
     has_access: bool,
+    /// Whether the requested model is in an active per-user allowlist.
+    /// Absent on older metering-service responses; the legacy hasAccess
+    /// behavior is preserved in that case.
+    model_allowed: Option<bool>,
 }
 
 // -----------------------------------------------------------------------------
@@ -706,6 +750,10 @@ fn parse_balance_result(body: &[u8], fail_open: bool) -> FilterAction {
         return admit_or_reject(fail_open);
     };
 
+    if balance.model_allowed == Some(false) {
+        return reject_model_not_allowed();
+    }
+
     if balance.has_access {
         trace!("balance check passed");
         FilterAction::Continue
@@ -735,6 +783,15 @@ fn reject_budget_exhausted() -> FilterAction {
     debug!("token budget exhausted");
     FilterAction::Reject(
         Rejection::status(STATUS_BUDGET_EXHAUSTED).with_body(Bytes::from_static(b"token budget exhausted")),
+    )
+}
+
+/// Reject a request whose model is outside the user's active allowlist.
+fn reject_model_not_allowed() -> FilterAction {
+    debug!("requested model is not allowed for this user");
+    FilterAction::Reject(
+        Rejection::status(http::StatusCode::FORBIDDEN.as_u16())
+            .with_body(Bytes::from_static(b"model not allowed for this user")),
     )
 }
 
