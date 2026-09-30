@@ -844,11 +844,7 @@ fn reject_unavailable() -> FilterAction {
     clippy::too_many_lines,
     reason = "sequential request setup plus the explicit address-policy transport input"
 )]
-fn spawn_usage_report(
-    client: SubRequestClient,
-    report: MeteringReportConfig,
-    event: &serde_json::Value,
-) {
+fn spawn_usage_report(client: SubRequestClient, report: MeteringReportConfig, event: &serde_json::Value) {
     let body = match serde_json::to_vec(event) {
         Ok(b) => b,
         Err(e) => {
@@ -859,10 +855,7 @@ fn spawn_usage_report(
 
     tokio::spawn(async move {
         let mut headers = http::HeaderMap::new();
-        headers.insert(
-            http::header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
+        headers.insert(http::header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
         if let Some(token) = report.internal_auth_token {
             headers.insert(INTERNAL_AUTH_HEADER.clone(), token);
         }
@@ -891,7 +884,9 @@ fn spawn_usage_report(
 /// configuration errors or logs.
 fn read_internal_auth_token(path: &str) -> Result<HeaderValue, FilterError> {
     let token = fs::read_to_string(path).map_err(|error| {
-        FilterError::from(format!("external_metering: internal_auth_file could not be read: {error}"))
+        FilterError::from(format!(
+            "external_metering: internal_auth_file could not be read: {error}"
+        ))
     })?;
     let token = token.trim();
     if token.is_empty() {
@@ -901,9 +896,8 @@ fn read_internal_auth_token(path: &str) -> Result<HeaderValue, FilterError> {
         return Err("external_metering: internal_auth_file contains whitespace".into());
     }
     let value = format!("Bearer {token}");
-    HeaderValue::from_str(&value).map_err(|error| {
-        FilterError::from(format!("external_metering: internal_auth_file is invalid: {error}"))
-    })
+    HeaderValue::from_str(&value)
+        .map_err(|error| FilterError::from(format!("external_metering: internal_auth_file is invalid: {error}")))
 }
 
 /// Build the shared Authorization header used by entitlement and event calls.

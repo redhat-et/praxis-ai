@@ -2,14 +2,14 @@
 // Copyright (c) 2026 Praxis Contributors
 
 use http::HeaderValue;
-
-use super::*;
-use crate::test_utils::{make_filter_context, make_request};
 use serde_json::json;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{header, method, path, query_param},
 };
+
+use super::*;
+use crate::test_utils::{make_filter_context, make_request};
 
 /// Build the concrete filter with a private test client.
 fn build_filter(yaml: &serde_yaml::Value) -> Result<ExternalMeteringFilter, FilterError> {
