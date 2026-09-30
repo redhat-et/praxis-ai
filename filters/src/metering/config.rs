@@ -34,8 +34,13 @@ const DEFAULT_SOURCE: &str = "ai-gateway";
 /// internal_auth_file: "/etc/praxis-secrets/metering-token"
 /// default_username: "anonymous"
 /// default_model: "unknown"
+/// model_policy_check: false
 /// ```
 #[derive(Debug, Deserialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "these independent booleans are operator-facing behavior switches"
+)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ExternalMeteringConfig {
     /// Base URL of the external metering service (required).
@@ -98,14 +103,11 @@ pub(super) struct ExternalMeteringConfig {
     #[serde(default)]
     pub default_model: Option<String>,
 
-    /// Optional internal bearer token for authenticating metering callouts
-    /// (the balance check and the usage report). One of `value | env_var |
-    /// file`, read through the shared [`CredentialSource`] core: bounded reads,
-    /// restart-free file rotation (ideal for a Kubernetes projected Secret),
-    /// and fail-closed publication. When omitted, callouts are sent
-    /// unauthenticated (unchanged behavior).
+    /// Buffer the request body before the entitlement check so the public
+    /// model ID can be included in the preflight. Enable when the metering
+    /// service enforces per-user model allowlists.
     #[serde(default)]
-    pub internal_auth_token: Option<CredentialSource>,
+    pub model_policy_check: bool,
 }
 
 /// Validate config at construction time.

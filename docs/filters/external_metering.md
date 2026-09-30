@@ -27,7 +27,7 @@ When no `{prefix}model` identity header names the model and `model_to_provider` 
 | `internal_auth_file` | string | no | Optional file containing the bearer token used to authenticate gateway-to-metering subrequests. The file is read at pipeline build time and the token is never logged or put in the request body. |
 | `default_username` | string | no | Fallback username when no identity header is present. If set, requests without `{prefix}username` are still metered under this name. If unset, metering is skipped entirely. |
 | `default_model` | string | no | Fallback model name when no identity model header is present. |
-| `internal_auth_token` | CredentialSource | no | Optional internal bearer token for authenticating metering callouts (the balance check and the usage report). One of `value \| env_var \| file`, read through the shared [`CredentialSource`] core: bounded reads, restart-free file rotation (ideal for a Kubernetes projected Secret), and fail-closed publication. When omitted, callouts are sent unauthenticated (unchanged behavior). |
+| `model_policy_check` | bool | no | Default `false`. When `true`, buffers the request body up to 32 MiB before entitlement checking so the public model ID can be evaluated against a per-user Metering allowlist. Enable only when that policy is configured. |
 
 ## Example
 
@@ -44,4 +44,5 @@ identity_metadata_namespace: "identity"
 internal_auth_file: "/etc/praxis-secrets/metering-token"
 default_username: "anonymous"
 default_model: "unknown"
+model_policy_check: true
 ```
