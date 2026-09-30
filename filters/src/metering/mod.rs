@@ -81,6 +81,11 @@ const METRIC_REPORT_FAILURES: &str = "praxis_ai_metering_report_failures_total";
 /// anything larger indicates a misbehaving service and is cut off.
 const MAX_CALLOUT_RESPONSE_BYTES: usize = 64 * 1024;
 
+/// Maximum request body pre-read when an operator opts into per-user model
+/// allowlist checks. `EnMaaS` model-access pipelines already buffer up to this
+/// bound for body-based model selection.
+const MODEL_POLICY_BODY_BUFFER_BYTES: usize = 32 * 1024 * 1024;
+
 /// Keepalive pool size for the private per-filter sub-request connector
 /// created by [`ExternalMeteringFilter::from_config`].
 const PRIVATE_POOL_SIZE: usize = 4;
@@ -145,6 +150,7 @@ const STATUS_METERING_UNAVAILABLE: u16 = 503;
 /// internal_auth_file: "/etc/praxis-secrets/metering-token"
 /// default_username: "anonymous"
 /// default_model: "unknown"
+/// model_policy_check: false
 /// ```
 pub struct ExternalMeteringFilter {
     /// Connect-time policy for the metering endpoint. Rejects non-public
@@ -154,6 +160,10 @@ pub struct ExternalMeteringFilter {
     /// Model name reported when neither the identity header nor the request
     /// body reveals one.
     default_model: Option<String>,
+
+    /// Whether to pre-read request JSON so the entitlement check sees the
+    /// public model before forwarding the body upstream.
+    model_policy_check: bool,
 
     /// Username reported when no identity header is present. When unset,
     /// unidentified requests are not metered at all.
@@ -240,6 +250,7 @@ impl ExternalMeteringFilter {
         Ok(Self {
             address_policy: AddressPolicy::from_allow_private(cfg.allow_private_endpoint),
             default_model: cfg.default_model,
+            model_policy_check: cfg.model_policy_check,
             default_username: cfg.default_username,
             fail_open: cfg.fail_open,
             feature_key: cfg.feature_key,
@@ -367,11 +378,7 @@ impl HttpFilter for ExternalMeteringFilter {
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let mut state = capture_identity(ctx, &self.identity_header_prefix, &self.identity_metadata_namespace);
-        if state.model.is_empty()
-            && let Some(model) = ctx.get_metadata(MODEL_PROVIDER_CLIENT_MODEL_METADATA)
-        {
-            state.model = model.to_owned();
-        }
+        resolve_request_model(ctx, &mut state, self.model_policy_check);
 
         if state.username.is_empty() {
             let Some(fallback) = self.default_username.as_ref() else {
@@ -397,7 +404,13 @@ impl HttpFilter for ExternalMeteringFilter {
     }
 
     fn request_body_mode(&self) -> BodyMode {
-        BodyMode::Stream
+        if self.model_policy_check {
+            BodyMode::StreamBuffer {
+                max_bytes: Some(MODEL_POLICY_BODY_BUFFER_BYTES),
+            }
+        } else {
+            BodyMode::Stream
+        }
     }
 
     async fn on_request_body(
@@ -467,6 +480,37 @@ impl HttpFilter for ExternalMeteringFilter {
         }
 
         Ok(FilterAction::Continue)
+    }
+}
+
+/// Resolve the public inference model for the entitlement preflight.
+///
+/// Trust order is identity metadata, provider-resolved metadata, an opt-in
+/// buffered request body, then an internally promoted `X-Model` mutation.
+/// A raw client `X-Model` header is never consulted.
+fn resolve_request_model(ctx: &HttpFilterContext<'_>, state: &mut MeteringState, model_policy_check: bool) {
+    if state.model.is_empty()
+        && let Some(model) = ctx.get_metadata(MODEL_PROVIDER_CLIENT_MODEL_METADATA)
+    {
+        model.clone_into(&mut state.model);
+    }
+    if state.model.is_empty()
+        && model_policy_check
+        && let Some(model) = ctx
+            .buffered_request_body
+            .as_ref()
+            .and_then(|body| extract_model_from_bytes(body))
+    {
+        state.model = model;
+    }
+    if state.model.is_empty()
+        && let Ok(praxis_filter::PendingHeaderResult::Value(model)) =
+            ctx.pending_header_value(&HeaderName::from_static("x-model"))
+    {
+        let model = model.trim();
+        if !model.is_empty() {
+            model.clone_into(&mut state.model);
+        }
     }
 }
 
@@ -561,6 +605,10 @@ struct EventContext<'a> {
 struct BalanceResponse {
     /// Whether the tenant may spend more tokens.
     has_access: bool,
+    /// Whether the requested model is in an active per-user allowlist.
+    /// Absent on older metering-service responses; the legacy hasAccess
+    /// behavior is preserved in that case.
+    model_allowed: Option<bool>,
 }
 
 // -----------------------------------------------------------------------------
@@ -732,6 +780,10 @@ fn parse_balance_result(body: &[u8], fail_open: bool) -> FilterAction {
         return admit_or_reject(fail_open);
     };
 
+    if balance.model_allowed == Some(false) {
+        return reject_model_not_allowed();
+    }
+
     if balance.has_access {
         trace!("balance check passed");
         FilterAction::Continue
@@ -764,6 +816,15 @@ fn reject_budget_exhausted() -> FilterAction {
     )
 }
 
+/// Reject a request whose model is outside the user's active allowlist.
+fn reject_model_not_allowed() -> FilterAction {
+    debug!("requested model is not allowed for this user");
+    FilterAction::Reject(
+        Rejection::status(http::StatusCode::FORBIDDEN.as_u16())
+            .with_body(Bytes::from_static(b"model not allowed for this user")),
+    )
+}
+
 /// Admit the request when configured to fail open, reject it otherwise.
 fn admit_or_reject(fail_open: bool) -> FilterAction {
     if fail_open {
@@ -792,11 +853,7 @@ fn reject_unavailable() -> FilterAction {
     clippy::too_many_lines,
     reason = "sequential request setup plus the explicit address-policy transport input"
 )]
-fn spawn_usage_report(
-    client: SubRequestClient,
-    report: MeteringReportConfig,
-    event: &serde_json::Value,
-) {
+fn spawn_usage_report(client: SubRequestClient, report: MeteringReportConfig, event: &serde_json::Value) {
     let body = match serde_json::to_vec(event) {
         Ok(b) => b,
         Err(e) => {
@@ -807,10 +864,7 @@ fn spawn_usage_report(
 
     tokio::spawn(async move {
         let mut headers = http::HeaderMap::new();
-        headers.insert(
-            http::header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
+        headers.insert(http::header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
         if let Some(token) = report.internal_auth_token {
             headers.insert(INTERNAL_AUTH_HEADER.clone(), token);
         }
@@ -839,7 +893,9 @@ fn spawn_usage_report(
 /// configuration errors or logs.
 fn read_internal_auth_token(path: &str) -> Result<HeaderValue, FilterError> {
     let token = fs::read_to_string(path).map_err(|error| {
-        FilterError::from(format!("external_metering: internal_auth_file could not be read: {error}"))
+        FilterError::from(format!(
+            "external_metering: internal_auth_file could not be read: {error}"
+        ))
     })?;
     let token = token.trim();
     if token.is_empty() {
@@ -849,9 +905,8 @@ fn read_internal_auth_token(path: &str) -> Result<HeaderValue, FilterError> {
         return Err("external_metering: internal_auth_file contains whitespace".into());
     }
     let value = format!("Bearer {token}");
-    HeaderValue::from_str(&value).map_err(|error| {
-        FilterError::from(format!("external_metering: internal_auth_file is invalid: {error}"))
-    })
+    HeaderValue::from_str(&value)
+        .map_err(|error| FilterError::from(format!("external_metering: internal_auth_file is invalid: {error}")))
 }
 
 /// Build the shared Authorization header used by entitlement and event calls.
