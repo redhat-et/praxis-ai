@@ -69,3 +69,9 @@ upstream Praxis filter/core stack. ET `main` also carries generated docs,
 examples, functional integration tests, the `reject_upgrade` security
 registration, and the SSE integration test coverage; see the feature commits
 above. Build EnMaaS images with `PRAXIS_AI_FEATURES=full,gcp-adc-filter`.
+
+## Pending EnMaaS user-model policy integration
+
+- Metering policy/API: [redhat-et/pricetag-metering#17](https://github.com/redhat-et/pricetag-metering/pull/17) adds the per-user exact model allowlist and enforces it in the entitlement response.
+- Praxis companion: [redhat-et/praxis-ai#3](https://github.com/redhat-et/praxis-ai/pull/3) sends the resolved body model in the preflight and maps a model-policy denial to 403. The optional `external_metering.model_policy_check` setting defaults off and adds bounded request-body pre-read when enabled.
+- Keep the EnMaaS option off until both changes are reviewed, deployed together, and tested using synthetic identities. It must not be deployed from an unpushed/local-only commit.
