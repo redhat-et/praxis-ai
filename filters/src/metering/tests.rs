@@ -371,9 +371,11 @@ fn balance_response_no_access_rejects() {
 #[test]
 fn model_allowlist_denial_is_forbidden_not_quota_exhausted() {
     let body = br#"{"hasAccess": false, "modelAllowed": false}"#;
-    let FilterAction::Reject(rejection) = parse_balance_result(body, true) else {
-        panic!("disallowed model should reject even with fail-open enabled")
-    };
+    let rejection = match parse_balance_result(body, true) {
+        FilterAction::Reject(rejection) => Some(rejection),
+        _ => None,
+    }
+    .expect("disallowed model should reject even with fail-open enabled");
     assert_eq!(rejection.status, http::StatusCode::FORBIDDEN.as_u16());
 }
 

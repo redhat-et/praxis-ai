@@ -39,6 +39,10 @@ const DEFAULT_IDENTITY_METADATA_NAMESPACE: &str = "identity";
 /// model_policy_check: false
 /// ```
 #[derive(Debug, Deserialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "these independent booleans are operator-facing behavior switches"
+)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ExternalMeteringConfig {
     /// Base URL of the external metering service (required).

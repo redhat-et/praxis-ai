@@ -92,7 +92,7 @@ const METRIC_REPORT_FAILURES: &str = "praxis_ai_metering_report_failures_total";
 const MAX_CALLOUT_RESPONSE_BYTES: usize = 64 * 1024;
 
 /// Maximum request body pre-read when an operator opts into per-user model
-/// allowlist checks. EnMaaS model-access pipelines already buffer up to this
+/// allowlist checks. `EnMaaS` model-access pipelines already buffer up to this
 /// bound for body-based model selection.
 const MODEL_POLICY_BODY_BUFFER_BYTES: usize = 32 * 1024 * 1024;
 
@@ -356,34 +356,7 @@ impl HttpFilter for ExternalMeteringFilter {
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let mut state = capture_identity(ctx, &self.identity_header_prefix, &self.identity_metadata_namespace);
-        if state.model.is_empty()
-            && let Some(model) = ctx.get_metadata(MODEL_PROVIDER_CLIENT_MODEL_METADATA)
-        {
-            state.model = model.to_owned();
-        }
-        if state.model.is_empty()
-            && self.model_policy_check
-            && let Some(model) = ctx
-                .buffered_request_body
-                .as_ref()
-                .and_then(|body| extract_model_from_bytes(body))
-        {
-            state.model = model;
-        }
-        // `model_to_header` promotes the body model to a pending X-Model
-        // mutation during pre-read. Read that trusted pending value here so
-        // the entitlement subrequest can enforce per-user model allowlists
-        // before the inference body is released upstream. Never fall back to
-        // the raw client-supplied X-Model header.
-        if state.model.is_empty()
-            && let Ok(praxis_filter::PendingHeaderResult::Value(model)) =
-                ctx.pending_header_value(&HeaderName::from_static("x-model"))
-        {
-            let model = model.trim();
-            if !model.is_empty() {
-                state.model = model.to_owned();
-            }
-        }
+        resolve_request_model(ctx, &mut state, self.model_policy_check);
 
         if state.username.is_empty() {
             let Some(fallback) = self.default_username.as_ref() else {
@@ -485,6 +458,37 @@ impl HttpFilter for ExternalMeteringFilter {
         }
 
         Ok(FilterAction::Continue)
+    }
+}
+
+/// Resolve the public inference model for the entitlement preflight.
+///
+/// Trust order is identity metadata, provider-resolved metadata, an opt-in
+/// buffered request body, then an internally promoted `X-Model` mutation.
+/// A raw client `X-Model` header is never consulted.
+fn resolve_request_model(ctx: &HttpFilterContext<'_>, state: &mut MeteringState, model_policy_check: bool) {
+    if state.model.is_empty()
+        && let Some(model) = ctx.get_metadata(MODEL_PROVIDER_CLIENT_MODEL_METADATA)
+    {
+        model.clone_into(&mut state.model);
+    }
+    if state.model.is_empty()
+        && model_policy_check
+        && let Some(model) = ctx
+            .buffered_request_body
+            .as_ref()
+            .and_then(|body| extract_model_from_bytes(body))
+    {
+        state.model = model;
+    }
+    if state.model.is_empty()
+        && let Ok(praxis_filter::PendingHeaderResult::Value(model)) =
+            ctx.pending_header_value(&HeaderName::from_static("x-model"))
+    {
+        let model = model.trim();
+        if !model.is_empty() {
+            model.clone_into(&mut state.model);
+        }
     }
 }
 
