@@ -21,6 +21,7 @@ Tenant identity is resolved from the highest-trust source available: verified `{
 | `fail_open` | bool | no | When `true` (default), requests proceed if the metering service is unavailable. When `false`, requests are rejected with 503. |
 | `identity_header_prefix` | string | no | Prefix for tenant identity headers to capture and strip. Expected headers: `{prefix}username`, `{prefix}group`, `{prefix}subscription`, `{prefix}model`. |
 | `identity_metadata_namespace` | string | no | Metadata namespace the `identity_header_guard` filter writes captured identity headers under. Must match that filter's `metadata_namespace` setting when both run in one pipeline. |
+| `internal_auth_file` | string | no | Optional file containing the bearer token used to authenticate gateway-to-metering subrequests. The file is read at pipeline build time and the token is never logged or put in the request body. |
 | `default_username` | string | no | Fallback username when no identity header is present. If set, requests without `{prefix}username` are still metered under this name. If unset, metering is skipped entirely. |
 | `default_model` | string | no | Fallback model name when no identity model header is present. |
 | `model_policy_check` | bool | no | Default `false`. When `true`, buffers the request body up to 32 MiB before entitlement checking so the public model ID can be evaluated against a per-user Metering allowlist. Enable only when that policy is configured. |
@@ -36,6 +37,7 @@ source: "ai-gateway"
 fail_open: true
 identity_header_prefix: "x-tenant-"
 identity_metadata_namespace: "identity"
+internal_auth_file: "/etc/praxis-secrets/metering-token"
 default_username: "anonymous"
 default_model: "unknown"
 model_policy_check: true
