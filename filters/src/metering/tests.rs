@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
+use http::HeaderValue;
+
 use super::*;
 use crate::test_utils::{make_filter_context, make_request};
 
@@ -205,7 +207,7 @@ async fn body_promoted_x_model_is_used_for_balance_check() {
     let mut ctx = make_filter_context(&req);
     ctx.request_headers_to_set.push((
         HeaderName::from_static("x-model"),
-        http::HeaderValue::from_static("gpt-5.6-luna"),
+        HeaderValue::from_static("gpt-5.6-luna"),
     ));
 
     let action = filter.on_request(&mut ctx).await.unwrap();
