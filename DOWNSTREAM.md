@@ -6,11 +6,11 @@ configuration and credentials remain in [`redhat-et/pricetag`](https://github.co
 
 ## Current sync status
 
-Status checked **2026-10-02**:
+Status checked **2026-10-05**:
 
 - ET `main`: `ae9821f8`
-- Upstream `praxis-proxy/ai` `main`: `715daf5d`
-- Divergence: 95 commits exist upstream but not in ET; 43 ET commits are not in upstream.
+- Upstream `praxis-proxy/ai` `main`: `c9cd262f`
+- Divergence: 101 commits exist upstream but not in ET; 43 ET commits are not in upstream.
 - The weekday `Sync upstream main` workflow is currently failing on merge conflicts. Recent conflicts include Cargo manifests, Vertex/GCP code, metering, filter registration, and integration tests.
 
 The workflow must not force-push. Resolve conflicts in ET, run the full required
