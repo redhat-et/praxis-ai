@@ -20,7 +20,7 @@ PRAXIS_AI_FEATURES ?= full
 # openssl-sys is not on the list: praxis performs all cryptography through the
 # system OpenSSL, so its bindings are part of every build by design.
 DEFAULT_GRAPH_DENY := sqlx sqlx-core libsqlite3-sys native-tls rmcp sse-stream \
-	jsonschema utoipa tiktoken-rs reqwest serde_json_path tonic prost
+	jsonschema utoipa tiktoken-rs serde_json_path tonic prost
 # Upper bound on crates (name@version, normal + build edges, host target) in the
 # default graph. reqwest is intentionally included for the api_key_auth filter.
 DEFAULT_GRAPH_BUDGET ?= 442
