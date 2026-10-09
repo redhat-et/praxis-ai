@@ -126,8 +126,9 @@ impl HttpFilter for TimeToFirstTokenFilter {
 
         let ttft = ctx.request_start.elapsed().as_secs_f64();
         let model = resolve_model(ctx);
+        let cluster = crate::llm_metrics::cluster(ctx);
 
-        histogram!(METRIC_TTFT_SECONDS, "model" => model).record(ttft);
+        histogram!(METRIC_TTFT_SECONDS, "model" => model, "cluster" => cluster).record(ttft);
         ctx.filter_metadata.remove(META_ACTIVE);
 
         debug!(ttft, "recorded time-to-first-token");
