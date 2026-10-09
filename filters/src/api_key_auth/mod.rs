@@ -119,6 +119,10 @@ impl ApiKeyAuthFilter {
         let cfg: ApiKeyAuthConfig = parse_filter_config("api_key_auth", value)?;
         validate_config(&cfg).map_err(|e| -> FilterError { e.into() })?;
 
+        // This filter owns a direct reqwest client rather than the shared
+        // Praxis subrequest client, so install the process-wide rustls
+        // provider at the same construction boundary.
+        praxis_tls::provider::install();
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(cfg.timeout_seconds))
             .build()

@@ -123,6 +123,7 @@ async fn internal_auth_is_sent_on_entitlement_and_event_subrequests() {
         input: 2,
         output: 1,
         total: 3,
+        reasoning: 0,
         cache_read: 0,
         cache_write: 0,
     };

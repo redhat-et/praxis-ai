@@ -55,17 +55,6 @@ pub(super) struct ServiceAccountKey {
 // Fetch
 // -----------------------------------------------------------------------------
 
-/// Response body from the GCE/GKE metadata server's token endpoint.
-/// Extra fields (`token_type`, …) are ignored.
-#[derive(Debug, Deserialize)]
-struct MetadataTokenResponse {
-    /// The `OAuth2` access token.
-    access_token: String,
-
-    /// Token lifetime in seconds.
-    expires_in: u64,
-}
-
 #[derive(Debug, Deserialize)]
 struct TokenEndpointResponse {
     access_token: String,

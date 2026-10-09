@@ -280,11 +280,13 @@ fn adc_without_env_selects_metadata() {
 
 #[test]
 fn adc_with_service_account_json_selects_key_file() {
-    let file = write_json(r#"{"type":"service_account","client_email":"sa@example.com"}"#);
+    let file = write_json(
+        r#"{"type":"service_account","client_email":"sa@example.com","private_key":"invalid","token_uri":"https://oauth2.googleapis.com/token"}"#,
+    );
     let config = parse_gcp_adc_config(&yaml("{}")).expect("parse");
     let source = resolve_token_source(&config, Some(file.path())).expect("service_account JSON should select key file");
     assert!(
-        matches!(source, TokenSource::ServiceAccountKey),
+        matches!(source, TokenSource::ServiceAccountKey(_)),
         "expected service account key source, got {source:?}"
     );
 }
@@ -458,7 +460,9 @@ async fn on_request_fails_closed_when_metadata_unreachable() {
 
 #[tokio::test]
 async fn on_request_fails_closed_for_key_file_source() {
-    let file = write_json(r#"{"type":"service_account","client_email":"sa@example.com"}"#);
+    let file = write_json(
+        r#"{"type":"service_account","client_email":"sa@example.com","private_key":"invalid","token_uri":"https://oauth2.googleapis.com/token"}"#,
+    );
     let filter = GcpAdcFilter::from_config(&yaml(&format!(
         "source: key_file\ncredentials_file: {}",
         file.path().display()
@@ -470,7 +474,7 @@ async fn on_request_fails_closed_for_key_file_source() {
     let action = filter.on_request(&mut ctx).await.expect("must reject, not error");
     assert!(
         matches!(action, FilterAction::Reject(r) if r.status == 503),
-        "key_file token fetch is not implemented yet and must fail closed with 503"
+        "invalid key_file credentials must fail closed with 503"
     );
 }
 

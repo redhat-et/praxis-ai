@@ -19,23 +19,21 @@
 
 use serde_json::{Map, Value};
 
-use crate::{anthropic::error_body, openai::sse::SseFrame};
+use crate::{anthropic::{ErrorType, error_body}, openai::sse::SseFrame};
 
 /// Map an HTTP status to the Anthropic error type clients retry on.
 /// Vertex Google-envelope statuses (`RESOURCE_EXHAUSTED` → 429,
 /// `UNAUTHENTICATED` → 401, …) share the numeric code semantics.
-fn anthropic_error_type(status: u16) -> &'static str {
+fn anthropic_error_type(status: u16) -> ErrorType {
     match status {
-        400 | 409 | 422 => "invalid_request_error",
-        401 => "authentication_error",
-        403 => "permission_error",
-        404 => "not_found_error",
-        413 => "request_too_large",
-        429 => "rate_limit_error",
-        500..=502 => "api_error",
-        503 | 504 => "overloaded_error",
-        _ if status >= 500 => "api_error",
-        _ => "invalid_request_error",
+        401 => ErrorType::Authentication,
+        403 => ErrorType::Permission,
+        404 => ErrorType::NotFound,
+        429 => ErrorType::RateLimit,
+        503 => ErrorType::Overloaded,
+        504 => ErrorType::Timeout,
+        500..=599 => ErrorType::Api,
+        _ => ErrorType::InvalidRequest,
     }
 }
 
@@ -151,7 +149,7 @@ mod tests {
             (401_u16, "authentication_error"),
             (403, "permission_error"),
             (404, "not_found_error"),
-            (413, "request_too_large"),
+            (413, "invalid_request_error"),
             (500, "api_error"),
             (503, "overloaded_error"),
             (520, "api_error"),

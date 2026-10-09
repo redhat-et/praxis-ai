@@ -63,7 +63,6 @@ pub fn register_ai_filters(registry: &mut FilterRegistry, subrequest_client: Opt
     #[cfg(feature = "openai-responses")]
     register_openai_responses_filters(registry, subrequest_client);
     register_routing_filters(registry);
-    register_vertex_filters(registry);
 }
 
 /// Install the pipeline extensions the registered AI filters rely on.
@@ -184,6 +183,10 @@ fn register_vertex_filters(registry: &mut FilterRegistry) {
     praxis_filter::register_filters!(
         @register registry,
         http "vertex" => praxis_ai_apis::vertex::VertexFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
+        http "openai_chat_completions_to_vertexai_gemini" => praxis_ai_apis::vertex::OpenaiChatCompletionsToVertexaiGeminiFilter::from_config
     );
 }
 
@@ -357,14 +360,6 @@ fn register_anthropic_filters(registry: &mut FilterRegistry, subrequest_client: 
         http "anthropic_messages_to_chat_completions_stream" => praxis_ai_apis::anthropic::AnthropicMessagesToChatCompletionsStreamFilter::from_config
     );
     register_anthropic_web_search(registry, subrequest_client);
-}
-
-/// Register Vertex AI translation filters.
-fn register_vertex_filters(registry: &mut FilterRegistry) {
-    praxis_filter::register_filters!(
-        @register registry,
-        http "openai_chat_completions_to_vertexai_gemini" => praxis_ai_apis::vertex::OpenaiChatCompletionsToVertexaiGeminiFilter::from_config
-    );
 }
 
 /// Register OpenAI Responses API request-path filters.
