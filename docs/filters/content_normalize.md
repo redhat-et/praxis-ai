@@ -9,10 +9,12 @@ Normalizes Anthropic content block types for vLLM/Qwen compatibility.
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
+| `models` | string[] | no | Exact or trailing-wildcard model IDs that should be normalized. An empty list preserves the legacy behavior and applies to every model. |
 | `max_body_bytes` | integer | no | Maximum request body size to buffer. |
 
 ## Example
 
 ```yaml
 filter: content_normalize
+models: ["Inferact/Qwen3.8-Flash-Next-NVFP4"]
 ```

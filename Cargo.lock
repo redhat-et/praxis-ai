@@ -3587,6 +3587,7 @@ dependencies = [
  "serde_json",
  "serde_json_canonicalizer",
  "serde_json_path",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror",
  "tiktoken-rs",

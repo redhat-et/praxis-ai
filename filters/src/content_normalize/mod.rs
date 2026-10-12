@@ -21,6 +21,7 @@
 //!
 //! ```yaml
 //! filter: content_normalize
+//! models: ["Inferact/Qwen3.8-Flash-Next-NVFP4"]
 //! ```
 //!
 //! Place this filter **before** the `load_balancer` in any chain that
@@ -67,6 +68,11 @@ const DEFAULT_MAX_BODY_BYTES: usize = 4_194_304; // 4 MiB — agentic sessions s
 #[serde(deny_unknown_fields)]
 /// Request-body normalization configuration.
 struct ContentNormalizeConfig {
+    /// Exact or trailing-wildcard model IDs that should be normalized.
+    /// An empty list preserves the legacy behavior and applies to every model.
+    #[serde(default)]
+    models: Vec<String>,
+
     /// Maximum request body size to buffer.
     #[serde(default = "default_max_body_bytes")]
     max_body_bytes: usize,
@@ -79,6 +85,9 @@ fn default_max_body_bytes() -> usize {
 
 /// Normalizes Anthropic content block types for vLLM/Qwen compatibility.
 pub struct ContentNormalizeFilter {
+    /// Exact or trailing-wildcard model IDs selected for normalization.
+    models: Vec<String>,
+
     /// Maximum request body bytes buffered for normalization.
     max_body_bytes: usize,
 }
@@ -92,8 +101,25 @@ impl ContentNormalizeFilter {
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: ContentNormalizeConfig = parse_filter_config("content_normalize", config)?;
         Ok(Box::new(Self {
+            models: cfg.models,
             max_body_bytes: cfg.max_body_bytes,
         }))
+    }
+
+    /// Whether this request's model is selected by the configured scope.
+    fn applies_to_model(&self, value: &Value) -> bool {
+        if self.models.is_empty() {
+            return true;
+        }
+        let Some(model) = value.get("model").and_then(Value::as_str) else {
+            return false;
+        };
+        self.models.iter().any(|configured| {
+            configured == "*"
+                || configured
+                    .strip_suffix('*')
+                    .map_or(configured == model, |prefix| model.starts_with(prefix))
+        })
     }
 }
 
@@ -229,6 +255,10 @@ impl HttpFilter for ContentNormalizeFilter {
             Ok(v) => v,
             Err(_) => return Ok(FilterAction::Continue),
         };
+
+        if !self.applies_to_model(&value) {
+            return Ok(FilterAction::Continue);
+        }
 
         let Some(messages) = value.get_mut("messages").and_then(Value::as_array_mut) else {
             return Ok(FilterAction::Continue);

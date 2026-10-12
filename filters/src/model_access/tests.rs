@@ -145,6 +145,16 @@ async fn group_override_allows_denied_model() {
 }
 
 #[tokio::test]
+async fn group_override_matches_one_group_in_comma_separated_metadata() {
+    let filter = make_filter_with_overrides("denylist", &["claude-fable-*"], &[("octo-eng", "allowlist", &["*"])]);
+    let action = run_with_model(&*filter, "claude-fable-5", Some("octo-eng, ai-platform")).await;
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "a matching group in comma-separated metadata should select its override"
+    );
+}
+
+#[tokio::test]
 async fn group_override_does_not_affect_other_groups() {
     let filter = make_filter_with_overrides("denylist", &["claude-fable-*"], &[("ai-eng", "allowlist", &["*"])]);
     // rhoai group has no override, falls back to default denylist

@@ -202,9 +202,13 @@ impl ModelAccessFilter {
 
     /// Find the applicable rule for the user's group.
     fn find_rule(&self, group: Option<&str>) -> &AccessRule {
-        if let Some(g) = group {
+        if let Some(groups) = group {
             for gr in &self.group_rules {
-                if gr.groups.iter().any(|allowed| allowed == g) {
+                if groups
+                    .split(',')
+                    .map(str::trim)
+                    .any(|group| gr.groups.iter().any(|allowed| allowed == group))
+                {
                     return &gr.rule;
                 }
             }

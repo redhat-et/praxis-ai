@@ -124,6 +124,32 @@ async fn invalid_key_rejected() {
 }
 
 #[tokio::test]
+async fn valid_response_without_username_is_rejected() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/validate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "valid": true,
+            "username": "",
+            "groups": ["ai-eng"]
+        })))
+        .mount(&server)
+        .await;
+
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str(&format!(r#"validate_url: "{}/validate""#, server.uri())).unwrap();
+    let filter = super::ApiKeyAuthFilter::from_config(&yaml).unwrap();
+
+    let mut req = make_request(Method::POST, "/v1/messages");
+    req.headers
+        .insert("x-api-key", HeaderValue::from_static("sk-oai-empty-user"));
+    let mut ctx = make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Reject(_)), "empty identity must fail closed");
+}
+
+#[tokio::test]
 async fn missing_key_rejected() {
     let server = MockServer::start().await;
     let yaml: serde_yaml::Value =

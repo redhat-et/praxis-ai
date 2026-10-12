@@ -16,6 +16,7 @@ use serde::Deserialize;
 /// validate_url: "http://maas-api:8080/internal/v1/api-keys/validate"
 /// token_header: "x-api-key"
 /// cache_ttl_seconds: 300
+/// cache_max_entries: 10000
 /// timeout_seconds: 5
 /// ```
 #[derive(Debug, Deserialize)]
@@ -32,6 +33,10 @@ pub(super) struct ApiKeyAuthConfig {
     #[serde(default = "default_cache_ttl")]
     pub cache_ttl_seconds: u64,
 
+    /// Maximum number of validated identities retained in memory.
+    #[serde(default = "default_cache_max_entries")]
+    pub cache_max_entries: usize,
+
     /// HTTP timeout for the validation callout (seconds).
     #[serde(default = "default_timeout")]
     pub timeout_seconds: u64,
@@ -45,6 +50,11 @@ fn default_token_header() -> String {
 /// Default cache TTL: 5 minutes.
 fn default_cache_ttl() -> u64 {
     300
+}
+
+/// Default cache capacity: ten thousand validated identities.
+fn default_cache_max_entries() -> usize {
+    10_000
 }
 
 /// Default callout timeout: 5 seconds.
@@ -63,6 +73,9 @@ pub(super) fn validate_config(config: &ApiKeyAuthConfig) -> Result<(), String> {
     }
     if config.timeout_seconds == 0 {
         return Err("api_key_auth: timeout_seconds must be greater than 0".into());
+    }
+    if config.cache_max_entries == 0 {
+        return Err("api_key_auth: cache_max_entries must be greater than 0".into());
     }
     Ok(())
 }
