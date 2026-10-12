@@ -30,7 +30,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use praxis_filter::{FilterAction, FilterError, HttpFilter, HttpFilterContext, Rejection, parse_filter_config};
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
+use sha2::{Digest as _, Sha256};
 use tokio::sync::RwLock;
 use tracing::debug;
 
@@ -158,15 +158,20 @@ impl ApiKeyAuthFilter {
     /// Store a validated identity in the cache.
     async fn cache_put(&self, key_hash: [u8; 32], identity: CachedIdentity) {
         let mut cache = self.cache.write().await;
-        if !cache.contains_key(&key_hash) && cache.len() >= self.cache_max_entries {
-            if let Some(evicted) = cache.keys().next().copied() {
-                cache.remove(&evicted);
-            }
+        if !cache.contains_key(&key_hash)
+            && cache.len() >= self.cache_max_entries
+            && let Some(evicted) = cache.keys().next().copied()
+        {
+            cache.remove(&evicted);
         }
         cache.insert(key_hash, identity);
     }
 
     /// Call the validation endpoint.
+    #[expect(
+        clippy::cognitive_complexity,
+        reason = "the validation callout has explicit fail-closed stages"
+    )]
     async fn validate_key(&self, key: &str) -> Option<CachedIdentity> {
         let body = serde_json::json!({"key": key});
 
