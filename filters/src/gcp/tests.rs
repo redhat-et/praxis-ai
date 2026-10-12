@@ -287,7 +287,7 @@ fn adc_with_service_account_json_selects_key_file() {
     let source = resolve_token_source(&config, Some(file.path())).expect("service_account JSON should select key file");
     assert!(
         matches!(source, TokenSource::ServiceAccountKey(_)),
-        "expected service account key source, got {source:?}"
+        "expected service account key source"
     );
 }
 
@@ -328,7 +328,7 @@ fn explicit_metadata_ignores_credentials_path() {
     let source = resolve_token_source(&config, Some(file.path())).expect("metadata must ignore ADC file");
     assert!(
         matches!(source, TokenSource::Metadata { .. }),
-        "explicit metadata must not read GOOGLE_APPLICATION_CREDENTIALS, got {source:?}"
+        "explicit metadata must not read GOOGLE_APPLICATION_CREDENTIALS"
     );
 }
 
