@@ -6,6 +6,8 @@
 use praxis_core::subrequest::SubRequestClient;
 use praxis_filter::{ChainBindingContext, FilterRegistry};
 
+#[cfg(feature = "api-key-auth-filter")]
+use crate::ApiKeyAuthFilter;
 #[cfg(feature = "azure-ad-filter")]
 use crate::AzureAdFilter;
 #[cfg(feature = "gcp-adc-filter")]
@@ -21,9 +23,9 @@ use crate::TokenCeilingFilter;
 #[cfg(feature = "token-rate-limit-filter")]
 use crate::TokenRateLimitFilter;
 use crate::{
-    A2aFilter, AiGuardrailsFilter, ApiKeyAuthFilter, ContentNormalizeFilter, CredentialInjectFilter,
-    ExternalMeteringFilter, IdentityHeaderGuardFilter, IntelligentRouteFilter, LlmisvcModelProviderResolverFilter,
-    McpFilter, ModelAccessFilter, ModelCatalogFilter, ModelToHeaderFilter, ModelToProviderFilter, PromptEnrichFilter,
+    A2aFilter, AiGuardrailsFilter, ContentNormalizeFilter, CredentialInjectFilter, ExternalMeteringFilter,
+    IdentityHeaderGuardFilter, IntelligentRouteFilter, LlmisvcModelProviderResolverFilter, McpFilter,
+    ModelAccessFilter, ModelCatalogFilter, ModelToHeaderFilter, ModelToProviderFilter, PromptEnrichFilter,
     ProviderRouteFilter, ReasoningEffortMapFilter, RejectUpgradeFilter, StreamUsageInjectFilter,
     TimeToFirstTokenFilter, TokenCountFilter, TokenUsageHeadersFilter,
 };
@@ -49,7 +51,7 @@ pub fn register_ai_filters(registry: &mut FilterRegistry, subrequest_client: Opt
     register_azure_filters(registry, subrequest_client);
     register_azure_translation_filters(registry);
     #[cfg(feature = "gcp-adc-filter")]
-    register_gcp_filters(registry);
+    register_gcp_filters(registry, subrequest_client);
     register_vertex_filters(registry);
     register_general_ai_filters(registry);
     register_reject_upgrade(registry);
@@ -65,7 +67,6 @@ pub fn register_ai_filters(registry: &mut FilterRegistry, subrequest_client: Opt
     #[cfg(feature = "openai-responses")]
     register_openai_responses_filters(registry, subrequest_client);
     register_routing_filters(registry);
-    register_vertex_filters(registry);
 }
 
 /// Install the pipeline extensions the registered AI filters rely on.
@@ -201,10 +202,17 @@ fn register_vertex_filters(registry: &mut FilterRegistry) {
         @register registry,
         http "vertex" => praxis_ai_apis::vertex::VertexFilter::from_config
     );
+    praxis_filter::register_filters!(
+        @register registry,
+        http "openai_chat_completions_to_vertexai_gemini" => praxis_ai_apis::vertex::OpenaiChatCompletionsToVertexaiGeminiFilter::from_config
+    );
 }
 
 /// Register general-purpose AI filters.
-#[expect(clippy::too_many_lines, reason = "long flat registration list")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "explicit registration order is the filter contract"
+)]
 fn register_general_ai_filters(registry: &mut FilterRegistry) {
     register_state_owner(registry);
     register_project_state_owner_headers(registry);
@@ -213,6 +221,23 @@ fn register_general_ai_filters(registry: &mut FilterRegistry) {
     praxis_filter::register_filters!(
         @register registry,
         http "http_callout" => HttpCalloutFilter::from_config
+    );
+    #[cfg(feature = "api-key-auth-filter")]
+    praxis_filter::register_filters!(
+        @register registry,
+        http "api_key_auth" => ApiKeyAuthFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
+        http "content_normalize" => ContentNormalizeFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
+        http "model_access" => ModelAccessFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
+        http "model_catalog" => ModelCatalogFilter::from_config
     );
     praxis_filter::register_filters!(
         @register registry,
@@ -251,6 +276,10 @@ fn register_request_metadata_filters(registry: &mut FilterRegistry) {
     );
     praxis_filter::register_filters!(
         @register registry,
+        http "model_to_provider" => ModelToProviderFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
         http "llmisvc_model_provider_resolver" => LlmisvcModelProviderResolverFilter::from_config
     );
     #[cfg(feature = "inflight-tracker-filter")]
@@ -268,8 +297,28 @@ fn register_inference_filters(registry: &mut FilterRegistry) {
     );
     praxis_filter::register_filters!(
         @register registry,
+        http "reasoning_effort_map" => ReasoningEffortMapFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
         http "time_to_first_token" => TimeToFirstTokenFilter::from_config
     );
+}
+
+/// Register the reject-upgrade filter, which refuses connection upgrades
+/// (e.g. `WebSocket`) so upgraded tunnels cannot bypass body-level metering.
+///
+/// Registered as security-critical: it guards quota/billing integrity, the
+/// same family as `api_key_auth`.
+#[expect(clippy::panic, reason = "duplicate filter registration is a fatal configuration bug")]
+fn register_reject_upgrade(registry: &mut FilterRegistry) {
+    registry
+        .register_with_class(
+            "reject_upgrade",
+            praxis_filter::FilterFactory::Http(std::sync::Arc::new(RejectUpgradeFilter::from_config)),
+            praxis_filter::SecurityClass::Security,
+        )
+        .unwrap_or_else(|_| panic!("duplicate filter name: 'reject_upgrade'"));
 }
 
 /// Register the reject-upgrade filter, which refuses connection upgrades
@@ -397,20 +446,6 @@ fn register_anthropic_filters(registry: &mut FilterRegistry, subrequest_client: 
         http "openai_chat_completions_to_anthropic_stream" => praxis_ai_apis::anthropic::OpenaiChatCompletionsToAnthropicStreamFilter::from_config
     );
     register_anthropic_web_search(registry, subrequest_client);
-}
-
-/// Register Vertex AI translation filters.
-fn register_vertex_filters(registry: &mut FilterRegistry) {
-    #[cfg(feature = "vertex-anthropic-filter")]
-    praxis_filter::register_filters!(
-        @register registry,
-        http "anthropic_messages_to_vertexai_anthropic" =>
-            praxis_ai_apis::vertex::AnthropicMessagesToVertexaiAnthropicFilter::from_config
-    );
-    praxis_filter::register_filters!(
-        @register registry,
-        http "openai_chat_completions_to_vertexai_gemini" => praxis_ai_apis::vertex::OpenaiChatCompletionsToVertexaiGeminiFilter::from_config
-    );
 }
 
 /// Register OpenAI Responses API request-path filters.

@@ -526,32 +526,20 @@ fn handle_json_body(
     provider: ProviderKind,
     max_body_bytes: usize,
 ) {
-    match (ctx.response_body_mode, end_of_stream, body.as_deref()) {
-        // A buffered chain hands filters each raw chunk while it accumulates and
-        // then re-delivers the frozen whole buffer at end-of-stream, so that body
-        // must not be appended to the chunks already captured.
-        (BodyMode::StreamBuffer { .. }, true, Some(eos_body)) => {
-            record_buffered_eos_usage(ctx, provider, eos_body, max_body_bytes);
-            clear_all_metadata(ctx);
-        },
-        _ => accumulate_json_body(ctx, body, end_of_stream, provider, max_body_bytes),
-    }
-}
+    // `StreamBuffer` contract violation guard: while a buffered chain is
+    // accumulating, the protocol hands filters each raw chunk *and* re-delivers
+    // the frozen full buffer at end-of-stream. Accumulating both would feed
+    // every byte twice into the hex buffer, and the concatenated parse would
+    // fail. Detect the buffered delivery and read the EOS body directly
+    // instead; the hex path stays for plain `Stream` chains and for chains
+    // whose buffer was released mid-stream (where the EOS call carries no
+    // body).
+    let buffered_eos_body = body
+        .as_deref()
+        .filter(|_| end_of_stream && matches!(ctx.response_body_mode, BodyMode::StreamBuffer { .. }));
 
-/// Captures each chunk as it arrives and parses the captured document once
-/// the stream ends.
-///
-/// Serves plain `Stream` chains, buffered chains while they accumulate (the
-/// captured chunks back the fallback in [`record_buffered_eos_usage`]), and
-/// buffered chains whose end-of-stream call carries no body.
-fn accumulate_json_body(
-    ctx: &mut HttpFilterContext<'_>,
-    body: &Option<Bytes>,
-    end_of_stream: bool,
-    provider: ProviderKind,
-    max_body_bytes: usize,
-) {
     if let Some(chunk) = body.as_ref()
+        && buffered_eos_body.is_none()
         && !accumulate_response_hex(ctx, chunk, max_body_bytes)
     {
         mark_json_overflow(ctx);
@@ -560,8 +548,13 @@ fn accumulate_json_body(
     }
 
     if end_of_stream {
-        if let Some(data) = ctx.filter_metadata.get(META_BUF_HEX).and_then(|hex| decode_hex(hex)) {
-            record_json_usage(ctx, provider, &data);
+        let hex_data = if buffered_eos_body.is_none() {
+            ctx.filter_metadata.get(META_BUF_HEX).and_then(|hex| decode_hex(hex))
+        } else {
+            None
+        };
+        if let Some(data) = buffered_eos_body.or(hex_data.as_deref()) {
+            record_json_usage(ctx, provider, data);
         }
 
         clear_all_metadata(ctx);

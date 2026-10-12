@@ -37,6 +37,12 @@
 //!
 //! [`VertexFilter`]
 
+// Keep the existing OpenAI-to-Gemini translation alongside the downstream
+// Anthropic rawPredict filter.
+pub(crate) mod gemini;
+pub(crate) mod wire;
+pub use gemini::OpenaiChatCompletionsToVertexaiGeminiFilter;
+
 mod config;
 mod request;
 mod response;

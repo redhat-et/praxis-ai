@@ -30,6 +30,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use praxis_filter::{FilterAction, FilterError, HttpFilter, HttpFilterContext, Rejection, parse_filter_config};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tracing::debug;
 
@@ -106,7 +107,10 @@ pub struct ApiKeyAuthFilter {
     cache_ttl: Duration,
 
     /// In-memory cache of validated keys (key hash → identity).
-    cache: Arc<RwLock<HashMap<u64, CachedIdentity>>>,
+    cache: Arc<RwLock<HashMap<[u8; 32], CachedIdentity>>>,
+
+    /// Maximum number of validated identities retained in memory.
+    cache_max_entries: usize,
 }
 
 impl ApiKeyAuthFilter {
@@ -119,6 +123,10 @@ impl ApiKeyAuthFilter {
         let cfg: ApiKeyAuthConfig = parse_filter_config("api_key_auth", value)?;
         validate_config(&cfg).map_err(|e| -> FilterError { e.into() })?;
 
+        // This filter owns a direct reqwest client rather than the shared
+        // Praxis subrequest client, so install the process-wide rustls
+        // provider at the same construction boundary.
+        praxis_tls::provider::install();
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(cfg.timeout_seconds))
             .build()
@@ -129,31 +137,32 @@ impl ApiKeyAuthFilter {
             validate_url: cfg.validate_url,
             token_header: cfg.token_header.to_lowercase(),
             cache_ttl: Duration::from_secs(cfg.cache_ttl_seconds),
+            cache_max_entries: cfg.cache_max_entries,
             cache: Arc::new(RwLock::new(HashMap::new())),
         }))
     }
 
-    /// Hash the API key for cache lookup (don't store raw keys).
-    fn hash_key(key: &str) -> u64 {
-        use std::hash::{Hash as _, Hasher as _};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        key.hash(&mut hasher);
-        hasher.finish()
+    /// Digest the API key for cache lookup without retaining the raw key.
+    fn hash_key(key: &str) -> [u8; 32] {
+        Sha256::digest(key.as_bytes()).into()
     }
 
     /// Look up a cached identity, returning `None` if expired.
-    async fn cache_get(&self, key_hash: u64) -> Option<CachedIdentity> {
-        let cached = {
-            let cache = self.cache.read().await;
-            cache.get(&key_hash).cloned()
-        };
-        let entry = cached?;
+    async fn cache_get(&self, key_hash: [u8; 32]) -> Option<CachedIdentity> {
+        let cache = self.cache.read().await;
+        let entry = cache.get(&key_hash)?.clone();
+        drop(cache);
         (entry.cached_at.elapsed() < self.cache_ttl).then_some(entry)
     }
 
     /// Store a validated identity in the cache.
-    async fn cache_put(&self, key_hash: u64, identity: CachedIdentity) {
+    async fn cache_put(&self, key_hash: [u8; 32], identity: CachedIdentity) {
         let mut cache = self.cache.write().await;
+        if !cache.contains_key(&key_hash) && cache.len() >= self.cache_max_entries {
+            if let Some(evicted) = cache.keys().next().copied() {
+                cache.remove(&evicted);
+            }
+        }
         cache.insert(key_hash, identity);
     }
 
@@ -172,6 +181,11 @@ impl ApiKeyAuthFilter {
 
         if !result.valid {
             debug!("key validation returned valid=false");
+            return None;
+        }
+
+        if result.username.trim().is_empty() {
+            debug!("key validation returned valid=true without a username");
             return None;
         }
 

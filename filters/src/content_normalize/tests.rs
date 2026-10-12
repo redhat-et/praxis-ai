@@ -11,6 +11,14 @@ fn make_filter() -> Box<dyn HttpFilter> {
     ContentNormalizeFilter::from_config(&serde_yaml::Value::Null).unwrap()
 }
 
+fn make_scoped_filter() -> Box<dyn HttpFilter> {
+    let config: serde_yaml::Value = serde_yaml::from_str(
+        "models:\n  - Inferact/Qwen3.8-Flash-Next-NVFP4\n",
+    )
+    .unwrap();
+    ContentNormalizeFilter::from_config(&config).unwrap()
+}
+
 async fn run(filter: &dyn HttpFilter, json: &serde_json::Value) -> (serde_json::Value, bool) {
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/messages");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -48,6 +56,38 @@ async fn rewrites_server_tool_use_to_tool_use() {
     assert_eq!(blocks[1]["type"], "tool_use", "server_tool_use should become tool_use");
     assert_eq!(blocks[1]["name"], "web_search", "name should be preserved");
     assert_eq!(blocks[1]["id"], "toolu_srv", "id should be preserved");
+}
+
+#[tokio::test]
+async fn scoped_filter_passes_provider_specific_model_through() {
+    let filter = make_scoped_filter();
+    let input = json!({
+        "model": "claude-sonnet-5",
+        "messages": [{"role": "user", "content": [
+            {"type": "server_tool_use", "id": "toolu_srv", "name": "web_search", "input": {}}
+        ]}]
+    });
+
+    let (result, mutated) = run(&*filter, &input).await;
+
+    assert!(!mutated, "provider-specific models must bypass vLLM normalization");
+    assert_eq!(result, input);
+}
+
+#[tokio::test]
+async fn scoped_filter_normalizes_selected_model() {
+    let filter = make_scoped_filter();
+    let input = json!({
+        "model": "Inferact/Qwen3.8-Flash-Next-NVFP4",
+        "messages": [{"role": "user", "content": [
+            {"type": "server_tool_use", "id": "toolu_srv", "name": "web_search", "input": {}}
+        ]}]
+    });
+
+    let (result, mutated) = run(&*filter, &input).await;
+
+    assert!(mutated, "selected vLLM models must be normalized");
+    assert_eq!(result["messages"][0]["content"][0]["type"], "tool_use");
 }
 
 #[tokio::test]

@@ -68,12 +68,12 @@ pub(super) enum AccessMode {
     Denylist,
 }
 
-/// Default for `max_body_bytes`.
+/// Default request body limit for model extraction.
 fn default_max_body_bytes() -> usize {
     65_536
 }
 
-/// Default for `group_metadata_key`.
+/// Default metadata key containing the caller's group.
 fn default_group_metadata_key() -> String {
     "x-tenant-group".to_owned()
 }

@@ -6,6 +6,10 @@ Its `main` branch is kept aligned with upstream `main` by the scheduled
 `main` on weekdays and can also be run manually. If a sync conflicts, the
 workflow fails rather than force-pushing; resolve the conflict and rerun it.
 
+The PR #9 port is based on the Praxis 0.7.3 crate baseline declared in
+`Cargo.toml`. Revalidate this inventory whenever the scheduled upstream sync
+or a Praxis version bump changes the filter registry or request-body APIs.
+
 ## Downstream changes
 
 - `main` contains upstream Praxis plus the ET-owned EnMaaS filter ports listed
@@ -42,7 +46,8 @@ owns the Praxis binary and filters; PriceTag deploys the already-built image.
 The current EnMaaS runtime config in `redhat-et/pricetag` uses the filters
 below. ET implementation commits are on this repo's `main`; the ET commit
 column is the build source of record. Upstream status was checked against
-`praxis-proxy/ai` `main` at `00489463`.
+the upstream `main` branch at the time of the PR #9 port. Recheck current
+upstream before removing any ET implementation.
 
 | Filter / capability | EnMaaS use | ET implementation / source path | Upstream PR/status |
 |---|---|---|---|
@@ -54,13 +59,18 @@ column is the build source of record. Upstream status was checked against
 | `reasoning_effort_map` | Map unsupported reasoning-effort values for selected backends | ET `0fdf5bc7`; `filters/src/reasoning_effort_map/` | No upstream PR found |
 | `token_count` provider `auto` | Select Anthropic/OpenAI parser from request path on the unified listener | ET `f8c74559`; `filters/src/token_usage/count.rs` | No upstream PR found |
 | `reject_upgrade` | Reject upgrades that bypass the metered request/response path | ET `a8e735a3`, `ef79aa79`; `filters/src/reject_upgrade/` | No upstream PR found |
-| `stream_usage_inject` | Request usage reporting on OpenAI Chat Completions streams | ET `0c900057`, `050611fc`; `filters/src/token_usage/stream_usage.rs` | [PR #1231](https://github.com/praxis-proxy/ai/pull/1231) is open |
+| `stream_usage_inject` | Request usage reporting on OpenAI Chat Completions streams | Upstream `686040a5`; no ET copy replayed | Upstream equivalent is present; keep using the upstream implementation and remove any duplicate ET port |
 | GCP `key_file` token source + cluster scope | Mint short-lived GCP tokens from a mounted SA key, only for the selected Vertex cluster | ET `769203cf`, `7f258fb4`; `filters/src/gcp/` | [PR #1356](https://github.com/praxis-proxy/ai/pull/1356) is open with the cluster-scope fix; base `gcp_adc` exists upstream |
 | GCP test-key hygiene | Generate ephemeral RSA material in tests instead of committing a PEM private key | ET `72263b1d`; `filters/src/gcp/tests.rs` | Included in the downstream; matching fixture cleanup is a fixup on open PR #1356 |
 | Vertex dialect routing | Translate only `vertex/*` models and route them to Vertex | ET `dc338bd8`, `9a5f1b23`; `apis/src/vertex/` | [PR #1358](https://github.com/praxis-proxy/ai/pull/1358) is open |
 | `model_to_provider` | Map stable client IDs to a provider route and provider target model; preserve the public model ID through Vertex JSON/SSE responses and metering | ET `1dfdfdd9`, `814c531b`; `filters/src/inference/model_to_provider.rs`, `filters/src/metering/`, `apis/src/vertex/` | [PR #1372](https://github.com/praxis-proxy/ai/pull/1372) is open |
 | `external_metering` file-backed internal auth | Send a projected Secret-backed bearer token to private entitlement/event endpoints | ET PR `redhat-et/praxis-ai#2`; `filters/src/metering/` | Downstream-only; paired with `redhat-et/pricetag-metering#2` |
 | StreamBuffer token-count correction | Prevent double-delivered JSON bodies from becoming zero-usage events | ET `05b8993a`, `57c4d14e`; `filters/src/token_usage/count.rs` | [PR #1360](https://github.com/praxis-proxy/ai/pull/1360) is open |
+
+PR #9's `model_access` port must fail closed for malformed or model-less POST
+inference requests when an allowlist applies, while permitting model-catalog
+GET requests that have no body model. Keep these method-specific security
+invariants covered by unit tests during future rebases.
 
 `external_metering`, `identity_header_guard`, `model_to_header`,
 `token_count`, and `token_usage_headers` are present in upstream `main`.

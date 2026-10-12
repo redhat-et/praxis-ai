@@ -269,8 +269,6 @@ impl ExternalMeteringFilter {
             .map(read_internal_auth_token)
             .transpose()?;
 
-        let (auth_token, auth_watch) = build_auth_token(cfg.internal_auth_token.as_ref())?;
-
         Ok(Self {
             address_policy: AddressPolicy::from_allow_private(cfg.allow_private_endpoint),
             auth_token,

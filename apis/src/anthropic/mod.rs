@@ -25,4 +25,4 @@ pub use openai_chat_completions_to_anthropic::OpenaiChatCompletionsToAnthropicFi
 pub use openai_chat_completions_to_anthropic_stream::OpenaiChatCompletionsToAnthropicStreamFilter;
 pub use protocol::AnthropicMessagesProtocolFilter;
 pub use web_search::AnthropicWebSearchFilter;
-pub(crate) use wire::{error_body, invalid_request_rejection};
+pub(crate) use wire::{ErrorType, error_body, invalid_request_rejection};

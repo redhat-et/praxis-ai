@@ -21,6 +21,7 @@
 //!
 //! ```yaml
 //! filter: content_normalize
+//! models: ["Inferact/Qwen3.8-Flash-Next-NVFP4"]
 //! ```
 //!
 //! Place this filter **before** the `load_balancer` in any chain that
@@ -63,23 +64,31 @@ const QWEN_TOOL_RESULT_TYPES: &[&str] = &["text", "image"];
 /// Default maximum request body bytes.
 const DEFAULT_MAX_BODY_BYTES: usize = 4_194_304; // 4 MiB — agentic sessions send large contexts
 
-/// Parsed YAML config for the `content_normalize` filter.
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+/// Request-body normalization configuration.
 struct ContentNormalizeConfig {
-    /// Maximum request body size accepted by the filter.
+    /// Exact or trailing-wildcard model IDs that should be normalized.
+    /// An empty list preserves the legacy behavior and applies to every model.
+    #[serde(default)]
+    models: Vec<String>,
+
+    /// Maximum request body size to buffer.
     #[serde(default = "default_max_body_bytes")]
     max_body_bytes: usize,
 }
 
-/// Default for `max_body_bytes`.
+/// Default request body limit for normalization.
 fn default_max_body_bytes() -> usize {
     DEFAULT_MAX_BODY_BYTES
 }
 
 /// Normalizes Anthropic content block types for vLLM/Qwen compatibility.
 pub struct ContentNormalizeFilter {
-    /// Maximum request body size accepted by the filter.
+    /// Exact or trailing-wildcard model IDs selected for normalization.
+    models: Vec<String>,
+
+    /// Maximum request body bytes buffered for normalization.
     max_body_bytes: usize,
 }
 
@@ -92,14 +101,34 @@ impl ContentNormalizeFilter {
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: ContentNormalizeConfig = parse_filter_config("content_normalize", config)?;
         Ok(Box::new(Self {
+            models: cfg.models,
             max_body_bytes: cfg.max_body_bytes,
         }))
+    }
+
+    /// Whether this request's model is selected by the configured scope.
+    fn applies_to_model(&self, value: &Value) -> bool {
+        if self.models.is_empty() {
+            return true;
+        }
+        let Some(model) = value.get("model").and_then(Value::as_str) else {
+            return false;
+        };
+        self.models.iter().any(|configured| {
+            configured == "*"
+                || configured
+                    .strip_suffix('*')
+                    .map_or(configured == model, |prefix| model.starts_with(prefix))
+        })
     }
 }
 
 /// Walks all messages and normalizes unsupported content block types.
 /// Returns `true` if any block was rewritten.
-#[expect(clippy::too_many_lines, reason = "sequential block-classify-rewrite pipeline")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "straight-line normalization of supported content block types"
+)]
 fn normalize_messages(messages: &mut Vec<Value>) -> bool {
     let mut mutated = false;
     for msg in messages {
@@ -226,6 +255,10 @@ impl HttpFilter for ContentNormalizeFilter {
             Ok(v) => v,
             Err(_) => return Ok(FilterAction::Continue),
         };
+
+        if !self.applies_to_model(&value) {
+            return Ok(FilterAction::Continue);
+        }
 
         let Some(messages) = value.get_mut("messages").and_then(Value::as_array_mut) else {
             return Ok(FilterAction::Continue);

@@ -12,6 +12,7 @@ Validates API keys against an external service and injects verified identity int
 | `validate_url` | string | yes | URL of the key validation endpoint. |
 | `token_header` | string | no | Header to read the API key from. |
 | `cache_ttl_seconds` | integer | no | How long to cache valid keys (seconds). |
+| `cache_max_entries` | integer | no | Maximum number of validated identities retained in memory. |
 | `timeout_seconds` | integer | no | HTTP timeout for the validation callout (seconds). |
 
 ## Example

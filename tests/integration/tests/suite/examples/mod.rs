@@ -190,6 +190,7 @@ mod token_usage_headers;
 mod token_usage_metrics;
 mod vector_stores_routing;
 mod vertex_anthropic;
+mod vertex_gemini;
 mod vllm_agentic_api;
 #[cfg(feature = "openai-responses")]
 mod web_search;
