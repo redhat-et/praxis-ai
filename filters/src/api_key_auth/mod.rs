@@ -158,6 +158,10 @@ impl ApiKeyAuthFilter {
     }
 
     /// Call the validation endpoint.
+    #[expect(
+        clippy::cognitive_complexity,
+        reason = "the validation callout has explicit fail-closed stages"
+    )]
     async fn validate_key(&self, key: &str) -> Option<CachedIdentity> {
         let body = serde_json::json!({"key": key});
 

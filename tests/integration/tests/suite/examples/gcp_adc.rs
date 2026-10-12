@@ -58,7 +58,7 @@ fn gcp_adc_key_file_failure_returns_service_unavailable() {
     let credentials_file = credentials.path().join("service-account.json");
     std::fs::write(
         &credentials_file,
-        r#"{"type":"service_account","client_email":"sa@example.com"}"#,
+        r#"{"type":"service_account","client_email":"sa@example.com","private_key":"invalid","token_uri":"https://oauth2.googleapis.com/token"}"#,
     )
     .expect("write service-account credentials");
 
