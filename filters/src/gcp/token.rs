@@ -7,7 +7,7 @@
 //! source from the GCE/GKE metadata server. The
 //! [`ServiceAccountKey`](TokenSource::ServiceAccountKey) mints a token by
 //! signing a short-lived `JWT` assertion and exchanging it at Google's
-//! OAuth2 token endpoint.
+//! `OAuth2` token endpoint.
 
 use std::{path::Path, time::Duration};
 
@@ -22,8 +22,11 @@ use serde::Deserialize;
 
 use super::config::{GcpAdcConfig, GcpAdcSource};
 
+/// `OAuth2` JWT bearer grant type.
 const JWT_BEARER_GRANT: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
+/// Lifetime used for signed service-account assertions.
 const ASSERTION_LIFETIME: Duration = Duration::from_secs(600);
+/// Google `OAuth2` token host accepted by credential-file validation.
 const GOOGLE_TOKEN_HOST: &str = "oauth2.googleapis.com";
 
 // -----------------------------------------------------------------------------
@@ -44,10 +47,15 @@ pub(super) enum TokenSource {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// Parsed service-account credential file.
 pub(super) struct ServiceAccountKey {
+    /// Service-account email used as the JWT issuer.
     pub client_email: String,
+    /// PEM-encoded RSA private key used to sign the assertion.
     pub private_key_pem: String,
+    /// Validated `OAuth2` token endpoint.
     pub token_url: String,
+    /// Whether the endpoint is a loopback test endpoint.
     pub loopback_test: bool,
 }
 
@@ -56,8 +64,11 @@ pub(super) struct ServiceAccountKey {
 // -----------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
+/// `OAuth2` token endpoint response.
 struct TokenEndpointResponse {
+    /// Bearer access token.
     access_token: String,
+    /// Token lifetime in seconds.
     expires_in: u64,
 }
 
@@ -106,7 +117,11 @@ pub(super) async fn fetch_pinned(
             fetch_metadata_token_url(client, &url, timeout, metadata_address_policy(metadata_host)).await
         },
         TokenSource::ServiceAccountKey(key) => {
-            let policy = if key.loopback_test { AddressPolicy::AllowPrivate } else { AddressPolicy::PublicOnly };
+            let policy = if key.loopback_test {
+                AddressPolicy::AllowPrivate
+            } else {
+                AddressPolicy::PublicOnly
+            };
             fetch_service_account_token(client, key, scope, timeout, policy).await
         },
     }
@@ -175,6 +190,7 @@ async fn fetch_metadata_token_url(
     parse_token_response(response.status, &response.body, "metadata")
 }
 
+/// Exchange a signed service-account assertion for an `OAuth2` token.
 async fn fetch_service_account_token(
     client: &SubRequestClient,
     key: &ServiceAccountKey,
@@ -205,14 +221,21 @@ async fn fetch_service_account_token(
 }
 
 #[derive(serde::Serialize)]
+/// Claims carried by a service-account JWT assertion.
 struct AssertionClaims<'a> {
+    /// Service-account issuer.
     iss: &'a str,
+    /// Requested `OAuth2` scope.
     scope: &'a str,
+    /// Token endpoint audience.
     aud: &'a str,
+    /// Assertion issue time.
     iat: u64,
+    /// Assertion expiry time.
     exp: u64,
 }
 
+/// Sign a short-lived service-account JWT assertion.
 fn sign_assertion(key: &ServiceAccountKey, scope: &str) -> Result<String, FilterError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -227,14 +250,21 @@ fn sign_assertion(key: &ServiceAccountKey, scope: &str) -> Result<String, Filter
     };
     let signing_key = jsonwebtoken::EncodingKey::from_rsa_pem(key.private_key_pem.as_bytes())
         .map_err(|e| FilterError::from(format!("gcp_adc: invalid private key in credentials file: {e}")))?;
-    jsonwebtoken::encode(&jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256), &claims, &signing_key)
-        .map_err(|e| FilterError::from(format!("gcp_adc: failed to sign service-account assertion: {e}")))
+    jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
+        &claims,
+        &signing_key,
+    )
+    .map_err(|e| FilterError::from(format!("gcp_adc: failed to sign service-account assertion: {e}")))
 }
 
+/// Validate and parse a token endpoint response.
 fn parse_token_response(status_code: u16, body: &[u8], context: &str) -> Result<(HeaderValue, Duration), FilterError> {
     let status = http::StatusCode::from_u16(status_code).unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
     if !status.is_success() {
-        return Err(FilterError::from(format!("gcp_adc: {context} token endpoint returned HTTP status {status}")));
+        return Err(FilterError::from(format!(
+            "gcp_adc: {context} token endpoint returned HTTP status {status}"
+        )));
     }
     let token: TokenEndpointResponse = serde_json::from_slice(body)
         .map_err(|e| FilterError::from(format!("gcp_adc: failed to parse {context} token response: {e}")))?;
@@ -254,12 +284,16 @@ fn parse_token_response(status_code: u16, body: &[u8], context: &str) -> Result<
 struct GoogleApplicationCredentials {
     /// Google credential `type` field.
     #[serde(rename = "type")]
+    /// Google credential type discriminator.
     cred_type: String,
     #[serde(default)]
+    /// Optional service-account email.
     client_email: Option<String>,
     #[serde(default)]
+    /// Optional PEM private key.
     private_key: Option<String>,
     #[serde(default)]
+    /// Optional `OAuth2` token URI.
     token_uri: Option<String>,
 }
 
@@ -328,6 +362,7 @@ fn parse_credential_file(path: &Path) -> Result<TokenSource, FilterError> {
     }
 }
 
+/// Validate service-account fields and construct a key-backed token source.
 fn service_account_source(parsed: GoogleApplicationCredentials) -> Result<TokenSource, FilterError> {
     let client_email = parsed
         .client_email
@@ -351,6 +386,7 @@ fn service_account_source(parsed: GoogleApplicationCredentials) -> Result<TokenS
     }))
 }
 
+/// Validate that a credential-file token URI targets the approved endpoint.
 fn validate_token_uri(raw: &str) -> Result<String, FilterError> {
     let parsed = url::Url::parse(raw)
         .map_err(|e| FilterError::from(format!("gcp_adc: credentials file token_uri is invalid: {e}")))?;

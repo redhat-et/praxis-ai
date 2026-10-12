@@ -101,9 +101,9 @@ mod openai_tool_parse;
 mod project_state_owner_headers;
 mod prompt_enrichment;
 mod provider_route;
-mod reject_upgrade;
 #[cfg(feature = "store-sqlite")]
 mod rehydrate;
+mod reject_upgrade;
 mod responses_routing;
 #[cfg(feature = "store-sqlite")]
 mod session_replay;
@@ -117,8 +117,8 @@ mod token_counting;
 mod token_rate_limit;
 mod token_usage_headers;
 mod vector_stores_routing;
-mod vertex_gemini;
 mod vertex_anthropic;
+mod vertex_gemini;
 mod vllm_agentic_api;
 mod web_search;
 mod web_search_chat_completions;

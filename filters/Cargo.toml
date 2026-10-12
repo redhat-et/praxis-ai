@@ -16,6 +16,9 @@ name = "praxis_ai_filters"
 default = ["standard"]
 # Default-on filters that sit behind a gate so minimal builds can drop them.
 standard = ["aws-sigv4-filter", "policy-engine"]
+# EnMaaS API-key authentication. Kept out of the lean standard graph because
+# its direct HTTP client is intentionally excluded from minimal builds.
+api-key-auth-filter = ["dep:reqwest"]
 # The `policy` filter from Praxis core. Kept explicit so no-default FIPS builds
 # can omit the policy engine and its pure-Rust cryptography.
 policy-engine = ["praxis-filter/policy-engine"]
@@ -40,7 +43,7 @@ openai-mcp-tools = ["store", "praxis-ai-apis/openai-mcp-tools"]
 # Every OpenAI group, without choosing a store backend.
 openai-all = ["openai-file-resolve-filter", "openai-conversations", "openai-compact", "openai-mcp-tools"]
 # Every non-experimental filter; equals the pre-feature-split capability.
-full = ["standard", "openai-all", "store-postgres"]
+full = ["standard", "api-key-auth-filter", "openai-all", "store-postgres"]
 # Experimental: the generic http_callout filter. Work in progress; the config
 # surface may change. Activates the `experimental` marker.
 http-callout-filter = ["experimental", "dep:serde_json_path"]
@@ -96,7 +99,7 @@ praxis-filter = { workspace = true, features = ["chain-binding"] }
 praxis-tls = { workspace = true }
 redis = { workspace = true, optional = true }
 rand = { workspace = true }
-reqwest.workspace = true
+reqwest = { workspace = true, optional = true }
 jsonwebtoken = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

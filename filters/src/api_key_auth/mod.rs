@@ -139,7 +139,7 @@ impl ApiKeyAuthFilter {
 
     /// Hash the API key for cache lookup (don't store raw keys).
     fn hash_key(key: &str) -> u64 {
-        use std::hash::{Hash, Hasher};
+        use std::hash::{Hash as _, Hasher as _};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         key.hash(&mut hasher);
         hasher.finish()
@@ -148,12 +148,9 @@ impl ApiKeyAuthFilter {
     /// Look up a cached identity, returning `None` if expired.
     async fn cache_get(&self, key_hash: u64) -> Option<CachedIdentity> {
         let cache = self.cache.read().await;
-        let entry = cache.get(&key_hash)?;
-        if entry.cached_at.elapsed() < self.cache_ttl {
-            Some(entry.clone())
-        } else {
-            None
-        }
+        let entry = cache.get(&key_hash)?.clone();
+        drop(cache);
+        (entry.cached_at.elapsed() < self.cache_ttl).then_some(entry)
     }
 
     /// Store a validated identity in the cache.
@@ -195,7 +192,6 @@ impl HttpFilter for ApiKeyAuthFilter {
         "api_key_auth"
     }
 
-    #[expect(clippy::too_many_lines, reason = "auth flow with cache + callout + metadata write")]
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         // 1. Extract the API key.
         let Some(key_value) = ctx.request.headers.get(&*self.token_header) else {

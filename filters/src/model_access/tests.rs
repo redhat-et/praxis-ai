@@ -3,6 +3,8 @@
 
 //! Unit tests for the model access filter.
 
+use std::fmt::Write as _;
+
 use bytes::Bytes;
 use http::Method;
 use praxis_filter::FilterAction;
@@ -183,24 +185,55 @@ async fn group_override_restricts_allowed_model() {
 // -----------------------------------------------------------------------------
 
 #[tokio::test]
-async fn missing_model_field_allows() {
+async fn denylist_missing_model_allows() {
     let filter = make_filter_simple("denylist", &["o3-pro"]);
     let body = br#"{"messages":[{"role":"user","content":"hi"}]}"#;
     let action = run_with_body(&*filter, body, None).await;
     assert!(
         matches!(action, FilterAction::Continue),
-        "missing model field should be allowed"
+        "denylist should allow a request without a model"
     );
 }
 
 #[tokio::test]
-async fn invalid_json_allows() {
+async fn denylist_invalid_json_allows() {
     let filter = make_filter_simple("denylist", &["o3-pro"]);
     let body = b"not json at all";
     let action = run_with_body(&*filter, body, None).await;
     assert!(
         matches!(action, FilterAction::Continue),
-        "invalid JSON should be allowed"
+        "denylist should allow malformed JSON"
+    );
+}
+
+#[tokio::test]
+async fn allowlist_missing_model_rejects_inference() {
+    let filter = make_filter_simple("allowlist", &["gpt-4o"]);
+    let body = br#"{"messages":[{"role":"user","content":"hi"}]}"#;
+    let action = run_with_body(&*filter, body, None).await;
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "allowlist must reject model-less inference"
+    );
+}
+
+#[tokio::test]
+async fn allowlist_invalid_json_rejects_inference() {
+    let filter = make_filter_simple("allowlist", &["gpt-4o"]);
+    let action = run_with_body(&*filter, b"not json", None).await;
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "allowlist must reject malformed inference"
+    );
+}
+
+#[tokio::test]
+async fn allowlist_allows_model_catalog_get_without_model() {
+    let filter = make_filter_simple("allowlist", &["gpt-4o"]);
+    let action = run_with_request(&*filter, Method::GET, "/v1/models", b"", None).await;
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "model catalog GET must not require a body model"
     );
 }
 
@@ -249,9 +282,10 @@ fn make_filter_with_overrides(
         .join("\n");
     let mut yaml_str = format!("mode: {mode}\nmodels:\n{models_yaml}\noverrides:\n");
     for (group, omode, omodels) in overrides {
-        yaml_str.push_str(&format!("  - groups: [\"{group}\"]\n    mode: {omode}\n    models:\n"));
+        writeln!(yaml_str, "  - groups: [\"{group}\"]\n    mode: {omode}\n    models:")
+            .expect("writing a String cannot fail");
         for m in *omodels {
-            yaml_str.push_str(&format!("      - \"{m}\"\n"));
+            writeln!(yaml_str, "      - \"{m}\"").expect("writing a String cannot fail");
         }
     }
     let yaml: serde_yaml::Value = serde_yaml::from_str(&yaml_str).unwrap();
@@ -259,15 +293,22 @@ fn make_filter_with_overrides(
 }
 
 async fn run_with_model(filter: &dyn praxis_filter::HttpFilter, model: &str, group: Option<&str>) -> FilterAction {
-    let body = format!(
-        r#"{{"model":"{}","messages":[{{"role":"user","content":"hi"}}]}}"#,
-        model
-    );
+    let body = format!(r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}]}}"#);
     run_with_body(filter, body.as_bytes(), group).await
 }
 
 async fn run_with_body(filter: &dyn praxis_filter::HttpFilter, body: &[u8], group: Option<&str>) -> FilterAction {
-    let req = make_request(Method::POST, "/v1/messages");
+    run_with_request(filter, Method::POST, "/v1/messages", body, group).await
+}
+
+async fn run_with_request(
+    filter: &dyn praxis_filter::HttpFilter,
+    method: Method,
+    path: &str,
+    body: &[u8],
+    group: Option<&str>,
+) -> FilterAction {
+    let req = make_request(method, path);
     let mut ctx = make_filter_context(&req);
     ctx.buffered_request_body = Some(Bytes::copy_from_slice(body));
     if let Some(g) = group {

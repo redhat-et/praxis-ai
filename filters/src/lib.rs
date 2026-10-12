@@ -9,6 +9,7 @@
 //! inference routing, prompt enrichment, and token usage handling.
 
 pub mod agentic;
+#[cfg(feature = "api-key-auth-filter")]
 pub mod api_key_auth;
 #[cfg(feature = "aws-sigv4-filter")]
 pub mod aws;
@@ -40,6 +41,7 @@ mod token_rate_limit;
 mod token_usage;
 
 pub use agentic::{a2a::A2aFilter, mcp::McpFilter};
+#[cfg(feature = "api-key-auth-filter")]
 pub use api_key_auth::ApiKeyAuthFilter;
 #[cfg(feature = "aws-sigv4-filter")]
 pub use aws::Sigv4SignFilter;

@@ -1213,6 +1213,7 @@ mod tests {
                 "chat_completions_to_bedrock_converse",
                 "messages_to_chat_completions",
                 "messages_native_passthrough",
+                "messages_to_vertex",
                 "responses_agentic_loop",
                 "responses_native_passthrough",
                 "openai_responses_to_chat_completions",
@@ -1248,6 +1249,7 @@ mod tests {
                 vec!["messages_native_passthrough"],
                 vec!["messages_native_passthrough"],
                 vec!["messages_native_passthrough"],
+                vec!["messages_to_vertex"],
                 vec!["responses_native_passthrough"],
                 vec!["responses_native_passthrough"],
                 vec!["responses_native_passthrough"],
@@ -1326,6 +1328,7 @@ mod tests {
                 CoverageStatus::LiveCovered,
                 CoverageStatus::LiveCovered,
                 CoverageStatus::SyntheticOnly,
+                CoverageStatus::SyntheticOnly,
                 CoverageStatus::LiveCovered,
                 CoverageStatus::LiveCovered,
                 CoverageStatus::LiveCovered,
@@ -1377,9 +1380,9 @@ mod tests {
                 CoverageStatus::SyntheticOnly,
             ]
         );
-        assert_eq!(report.features_total, 69, "manifest feature inventory count");
-        assert_eq!(report.scenarios_total, 58, "manifest scenario inventory count");
-        assert_eq!(report.recordings_total, 63, "manifest recording inventory count");
+        assert_eq!(report.features_total, 70, "manifest feature inventory count");
+        assert_eq!(report.scenarios_total, 59, "manifest scenario inventory count");
+        assert_eq!(report.recordings_total, 64, "manifest recording inventory count");
         assert_eq!(
             scenarios.keys().collect::<Vec<_>>(),
             vec![
@@ -1404,6 +1407,7 @@ mod tests {
                 "messages/upstream-error",
                 "messages/upstream-error-stream",
                 "messages/upstream-error-unknown-type",
+                "messages/vertex-model-alias",
                 "responses/agentic-deferred-mcp-connectors",
                 "responses/agentic-parallel-tool-calls",
                 "responses/agentic-status-less-function-call",
@@ -1443,7 +1447,7 @@ mod tests {
                 "vertex/invalid-content",
             ]
         );
-        assert_eq!(manifest.features.len(), 69, "manifest must declare every feature");
+        assert_eq!(manifest.features.len(), 70, "manifest must declare every feature");
         assert_eq!(manifest.version, 1);
         assert_eq!(
             manifest
@@ -1547,6 +1551,10 @@ mod tests {
                 (
                     &"messages.native.count_tokens".to_owned(),
                     &vec!["messages/native-count-tokens".to_owned()]
+                ),
+                (
+                    &"messages.vertex.model_alias".to_owned(),
+                    &vec!["messages/vertex-model-alias".to_owned()]
                 ),
                 (
                     &"responses.native.request".to_owned(),
@@ -1866,7 +1874,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("synthetic", CoverageStatus::SyntheticOnly)],
         );
-        for feature in &manifest.features[20..23] {
+        assert_eq!(
+            manifest.features[20]
+                .providers
+                .iter()
+                .map(|(provider, coverage)| (provider.as_str(), coverage.status.clone()))
+                .collect::<Vec<_>>(),
+            vec![("synthetic", CoverageStatus::SyntheticOnly)],
+        );
+        for feature in &manifest.features[21..24] {
             assert_eq!(
                 feature
                     .providers
@@ -1879,7 +1895,7 @@ mod tests {
                 ],
             );
         }
-        for feature in &manifest.features[23..35] {
+        for feature in &manifest.features[24..36] {
             assert_eq!(
                 feature
                     .providers
@@ -1889,7 +1905,7 @@ mod tests {
                 vec![("synthetic", CoverageStatus::SyntheticOnly)],
             );
         }
-        for feature in &manifest.features[35..37] {
+        for feature in &manifest.features[36..38] {
             assert_eq!(
                 feature
                     .providers
@@ -1899,7 +1915,7 @@ mod tests {
                 vec![("vllm", CoverageStatus::LiveCovered)],
             );
         }
-        for feature in &manifest.features[37..52] {
+        for feature in &manifest.features[38..53] {
             assert_eq!(
                 feature
                     .providers
@@ -1910,20 +1926,12 @@ mod tests {
             );
         }
         assert_eq!(
-            manifest.features[52]
-                .providers
-                .iter()
-                .map(|(provider, coverage)| (provider.as_str(), coverage.status.clone()))
-                .collect::<Vec<_>>(),
-            vec![("vllm", CoverageStatus::LiveCovered)],
-        );
-        assert_eq!(
             manifest.features[53]
                 .providers
                 .iter()
                 .map(|(provider, coverage)| (provider.as_str(), coverage.status.clone()))
                 .collect::<Vec<_>>(),
-            vec![("synthetic", CoverageStatus::SyntheticOnly)],
+            vec![("vllm", CoverageStatus::LiveCovered)],
         );
         assert_eq!(
             manifest.features[54]
@@ -1931,9 +1939,17 @@ mod tests {
                 .iter()
                 .map(|(provider, coverage)| (provider.as_str(), coverage.status.clone()))
                 .collect::<Vec<_>>(),
+            vec![("synthetic", CoverageStatus::SyntheticOnly)],
+        );
+        assert_eq!(
+            manifest.features[55]
+                .providers
+                .iter()
+                .map(|(provider, coverage)| (provider.as_str(), coverage.status.clone()))
+                .collect::<Vec<_>>(),
             vec![("vllm", CoverageStatus::LiveCovered)],
         );
-        for feature in &manifest.features[55..69] {
+        for feature in &manifest.features[56..70] {
             assert_eq!(
                 feature
                     .providers

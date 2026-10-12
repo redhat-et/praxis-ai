@@ -28,6 +28,7 @@ mod tests;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use http::Method;
 use praxis_filter::{
     BodyAccess, BodyMode, FilterAction, FilterError, HttpFilter, HttpFilterContext, Rejection, parse_filter_config,
 };
@@ -51,6 +52,7 @@ enum ModelPattern {
 }
 
 impl ModelPattern {
+    /// Compile a configured exact, prefix, or wildcard pattern.
     fn from_str(s: &str) -> Self {
         if s == "*" {
             Self::Wildcard
@@ -61,6 +63,7 @@ impl ModelPattern {
         }
     }
 
+    /// Test whether this pattern matches a requested model.
     fn matches(&self, model: &str) -> bool {
         match self {
             Self::Wildcard => true,
@@ -76,11 +79,14 @@ impl ModelPattern {
 
 /// A compiled access rule (default or per-group override).
 struct AccessRule {
+    /// Rule mode used after pattern matching.
     mode: AccessMode,
+    /// Compiled model patterns.
     patterns: Vec<ModelPattern>,
 }
 
 impl AccessRule {
+    /// Evaluate a model name according to this rule's mode.
     fn is_allowed(&self, model: &str) -> bool {
         let matched = self.patterns.iter().any(|p| p.matches(model));
         match self.mode {
@@ -96,7 +102,9 @@ impl AccessRule {
 
 /// A compiled group override with its group membership check.
 struct GroupRule {
+    /// Group names selecting this override.
     groups: Vec<String>,
+    /// Access rule for matching groups.
     rule: AccessRule,
 }
 
@@ -205,9 +213,29 @@ impl ModelAccessFilter {
     }
 }
 
+/// Return whether a request without a model must fail closed under an
+/// allowlist. Model discovery is a GET without a request model and must remain
+/// available; inference requests are POSTs and must identify a model before an
+/// allowlist can authorize them.
+fn requires_model_for_allowlist(method: &Method) -> bool {
+    *method == Method::POST
+}
+
+/// Build the rejection used when an allowlist cannot identify a model.
+fn reject_missing_model() -> FilterAction {
+    FilterAction::Reject(Rejection {
+        status: 403,
+        body: Some(Bytes::from("request model is required by access policy")),
+        headers: vec![],
+        header_map: None,
+        preserve_keepalive: false,
+    })
+}
+
 /// Minimal struct to extract only the `model` field from request JSON.
 #[derive(Deserialize)]
 struct ModelField {
+    /// Model identifier extracted from a JSON request body.
     model: Option<String>,
 }
 
@@ -227,6 +255,10 @@ impl HttpFilter for ModelAccessFilter {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "request parsing and access decision stay in one filter boundary"
+    )]
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         // Body is pre-read via StreamBuffer and available in
         // buffered_request_body during the header phase — before
@@ -237,28 +269,32 @@ impl HttpFilter for ModelAccessFilter {
             return Ok(FilterAction::Continue);
         };
 
-        let model = match serde_json::from_slice::<ModelField>(data) {
-            Ok(parsed) => parsed.model,
-            Err(_) => {
-                debug!("model_access: failed to parse request body, allowing");
-                return Ok(FilterAction::Continue);
-            },
-        };
-
-        let Some(model_name) = model else {
-            debug!("model_access: no model field in request body, allowing");
+        let group = ctx.filter_metadata.get(&self.group_metadata_key).map(String::as_str);
+        let rule = self.find_rule(group);
+        let model = if let Ok(parsed) = serde_json::from_slice::<ModelField>(data) {
+            parsed.model
+        } else {
+            debug!("model_access: failed to parse request body");
+            if rule.mode == AccessMode::Allowlist && requires_model_for_allowlist(&ctx.request.method) {
+                return Ok(reject_missing_model());
+            }
             return Ok(FilterAction::Continue);
         };
 
-        let group = ctx.filter_metadata.get(&self.group_metadata_key).map(|s| s.as_str());
-        let rule = self.find_rule(group);
+        let Some(model_name) = model else {
+            debug!("model_access: no model field in request body");
+            if rule.mode == AccessMode::Allowlist && requires_model_for_allowlist(&ctx.request.method) {
+                return Ok(reject_missing_model());
+            }
+            return Ok(FilterAction::Continue);
+        };
 
         if rule.is_allowed(&model_name) {
             debug!(model = %model_name, group = ?group, "model_access: allowed");
             Ok(FilterAction::Continue)
         } else {
             debug!(model = %model_name, group = ?group, "model_access: denied");
-            let msg = format!("model '{}' is not permitted by access policy", model_name);
+            let msg = format!("model '{model_name}' is not permitted by access policy");
             Ok(FilterAction::Reject(Rejection {
                 status: 403,
                 body: Some(Bytes::from(msg)),

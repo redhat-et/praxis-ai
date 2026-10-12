@@ -54,6 +54,7 @@ for how these are authored and regenerated.
 | [llmisvc-model-provider-resolver.yaml](configs/llmisvc-model-provider-resolver.yaml) | Rewrites publisher-ID body `model` values to the short model name for LLMISvc / KServe routing; the routing header (default `X-Model`) is left unchanged so routing can still use the publisher ID |
 | [mcp-classifier-routing.yaml](configs/mcp-classifier-routing.yaml) | Routes MCP requests by body-derived method and tool name |
 | [mcp-stateless-broker.yaml](configs/mcp-stateless-broker.yaml) | Configurable stateless MCP broker using the final MCP 2026-07-28 stateless profile |
+| [model-catalog.yaml](configs/model-catalog.yaml) | Answers GET /v1/models from static configuration instead of forwarding it upstream |
 | [model-to-header-routing.yaml](configs/model-to-header-routing.yaml) | Routes LLM API requests to different backends based on the "model" field in the JSON request body |
 | [model-to-provider.yaml](configs/model-to-provider.yaml) | Map a stable public model ID to a provider route and provider-specific model |
 | [nemo-guardrails-response.yaml](configs/nemo-guardrails-response.yaml) | Evaluates upstream responses against a NeMo Guardrails service |
@@ -61,6 +62,7 @@ for how these are authored and regenerated.
 | [project-state-owner-headers.yaml](configs/project-state-owner-headers.yaml) | Demonstrates the production boundary used when an external authenticator injects separate tenant and subject headers. `state_owner` consumes those assertions into an immutable internal owner and strips the inbound copies. `project_state_owner_headers` then recreates destination-specific headers from that normalized context |
 | [prompt-enrichment.yaml](configs/prompt-enrichment.yaml) | Injects system messages into OpenAI-compatible chat completion requests before forwarding to the upstream provider |
 | [provider-route.yaml](configs/provider-route.yaml) | This listener requires downstream mTLS. `peer_identity_trust` authenticates and authorizes the edge gateway before AI-owned x-ai-routing-* fields can influence provider-local routing |
+| [reject-upgrade.yaml](configs/reject-upgrade.yaml) | Refuses HTTP/1.1 connection-upgrade requests (e.g |
 | [stream-usage-inject.yaml](configs/stream-usage-inject.yaml) | Ensures every streaming OpenAI Chat Completions request carries stream_options.include_usage = true so the upstream response includes token usage in the final SSE event |
 | [time-to-first-token.yaml](configs/time-to-first-token.yaml) | Measures the elapsed time from request receipt to the first non-empty SSE body chunk and records a praxis_ai_ttft_seconds Prometheus histogram labeled by model |
 | [token-ceiling.yaml](configs/token-ceiling.yaml) | Place token_ceiling after any request translation or prompt enrichment so it evaluates the final provider-bound JSON body |

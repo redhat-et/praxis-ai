@@ -19,7 +19,10 @@
 
 use serde_json::{Map, Value};
 
-use crate::{anthropic::{ErrorType, error_body}, openai::sse::SseFrame};
+use crate::{
+    anthropic::{ErrorType, error_body},
+    openai::sse::SseFrame,
+};
 
 /// Map an HTTP status to the Anthropic error type clients retry on.
 /// Vertex Google-envelope statuses (`RESOURCE_EXHAUSTED` → 429,

@@ -181,6 +181,7 @@ impl GcpAdcFilter {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "credential fetch and fail-closed request boundary")]
 #[async_trait::async_trait]
 impl praxis_filter::HttpFilter for GcpAdcFilter {
     fn name(&self) -> &'static str {

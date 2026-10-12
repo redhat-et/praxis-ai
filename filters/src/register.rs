@@ -6,6 +6,8 @@
 use praxis_core::subrequest::SubRequestClient;
 use praxis_filter::{ChainBindingContext, FilterRegistry};
 
+#[cfg(feature = "api-key-auth-filter")]
+use crate::ApiKeyAuthFilter;
 #[cfg(feature = "azure-ad-filter")]
 use crate::AzureAdFilter;
 #[cfg(feature = "gcp-adc-filter")]
@@ -19,9 +21,9 @@ use crate::TokenCeilingFilter;
 #[cfg(feature = "token-rate-limit-filter")]
 use crate::TokenRateLimitFilter;
 use crate::{
-    A2aFilter, AiGuardrailsFilter, ApiKeyAuthFilter, ContentNormalizeFilter, CredentialInjectFilter,
-    ExternalMeteringFilter, IdentityHeaderGuardFilter, IntelligentRouteFilter, LlmisvcModelProviderResolverFilter,
-    McpFilter, ModelAccessFilter, ModelCatalogFilter, ModelToHeaderFilter, ModelToProviderFilter, PromptEnrichFilter,
+    A2aFilter, AiGuardrailsFilter, ContentNormalizeFilter, CredentialInjectFilter, ExternalMeteringFilter,
+    IdentityHeaderGuardFilter, IntelligentRouteFilter, LlmisvcModelProviderResolverFilter, McpFilter,
+    ModelAccessFilter, ModelCatalogFilter, ModelToHeaderFilter, ModelToProviderFilter, PromptEnrichFilter,
     ProviderRouteFilter, ReasoningEffortMapFilter, RejectUpgradeFilter, StreamUsageInjectFilter,
     TimeToFirstTokenFilter, TokenCountFilter, TokenUsageHeadersFilter,
 };
@@ -191,6 +193,10 @@ fn register_vertex_filters(registry: &mut FilterRegistry) {
 }
 
 /// Register general-purpose AI filters.
+#[expect(
+    clippy::too_many_lines,
+    reason = "explicit registration order is the filter contract"
+)]
 fn register_general_ai_filters(registry: &mut FilterRegistry) {
     register_state_owner(registry);
     register_project_state_owner_headers(registry);
@@ -200,6 +206,7 @@ fn register_general_ai_filters(registry: &mut FilterRegistry) {
         @register registry,
         http "http_callout" => HttpCalloutFilter::from_config
     );
+    #[cfg(feature = "api-key-auth-filter")]
     praxis_filter::register_filters!(
         @register registry,
         http "api_key_auth" => ApiKeyAuthFilter::from_config
