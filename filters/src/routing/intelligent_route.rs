@@ -34,7 +34,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use dashmap::DashMap;
 use http::{HeaderName, HeaderValue};
-use praxis_ai_apis::{MODEL_PROVIDER_CLIENT_MODEL_METADATA, json_body::replace_json_body};
+use praxis_ai_apis::{MODEL_PROVIDER_CLIENT_MODEL_METADATA, MODEL_PROVIDER_HEADER, json_body::replace_json_body};
 use praxis_filter::{
     BodyAccess, BodyMode, FilterAction, FilterError, HttpFilter, HttpFilterContext, Rejection,
     body::DEFAULT_JSON_BODY_MAX_BYTES, parse_filter_config,
@@ -66,6 +66,9 @@ const MAX_BINDINGS: usize = 10_000;
 
 /// Maximum session affinity TTL in seconds (24 hours).
 const MAX_TTL_SECS: u64 = 86_400;
+
+/// Internal provider marker retained for provider-specific path rewrites.
+const PROVIDER_HEADER: HeaderName = HeaderName::from_static(MODEL_PROVIDER_HEADER);
 
 /// Maximum number of configured management-path skip prefixes.
 const MAX_SKIP_PATHS: usize = 64;
@@ -888,6 +891,7 @@ impl HttpFilter for IntelligentRouteFilter {
             .push(HeaderName::from_static(PROVIDER_HOP_REQUEST_ID_HEADER));
         ctx.request_headers_to_remove
             .push(HeaderName::from_static(OVERLAY_REVISION_HEADER));
+        ctx.request_headers_to_remove.push(PROVIDER_HEADER.clone());
 
         // Management and discovery endpoints bypass model resolution entirely.
         if let Some(action) = self.try_management_skip(ctx) {
@@ -1228,6 +1232,13 @@ fn record_route_decision(ctx: &mut HttpFilterContext<'_>, local_site: &Arc<str>,
     ctx.set_metadata(ROUTE_NAME, &*candidate.name);
     ctx.set_metadata(ROUTE_SITE, &*candidate.site);
     ctx.set_metadata(ROUTE_STABLE_ID, &*candidate.stable_id);
+    if candidate.kind == CapabilityKind::InferenceModel {
+        if let Some(provider) = &candidate.provider
+            && let Ok(provider) = HeaderValue::from_str(provider.as_ref())
+        {
+            ctx.request_headers_to_set.push((PROVIDER_HEADER.clone(), provider));
+        }
+    }
     if let Some(rank) = candidate.rank {
         ctx.set_metadata(ROUTE_RANK, rank.to_string());
     }
@@ -3614,6 +3625,7 @@ mod tests {
             descriptor::validate_candidates(vec![
                 CandidateConfig {
                     cluster: cluster1.to_owned(),
+                    provider: None,
                     target_model: None,
                     paths: None,
                     credential: None,
@@ -3625,6 +3637,7 @@ mod tests {
                 },
                 CandidateConfig {
                     cluster: cluster2.to_owned(),
+                    provider: None,
                     target_model: None,
                     paths: None,
                     credential: None,
@@ -3644,6 +3657,7 @@ mod tests {
         RouteSnapshot::from_static(
             descriptor::validate_candidates(vec![CandidateConfig {
                 cluster: cluster.to_owned(),
+                provider: None,
                 target_model: None,
                 paths: None,
                 credential: None,
@@ -3696,6 +3710,7 @@ mod tests {
             route_candidates.push(RouteCandidate {
                 admission_state: AdmissionState::from_overlay_str(admission_str).unwrap(),
                 cluster: Arc::from(*cluster),
+                provider: None,
                 target_model: None,
                 paths: None,
                 credential: None,

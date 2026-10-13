@@ -106,6 +106,7 @@ mod tests {
         RouteCandidate {
             admission_state: admission,
             cluster: Arc::from(cluster),
+            provider: None,
             target_model: None,
             paths: None,
             credential: None,

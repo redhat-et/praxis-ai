@@ -147,6 +147,10 @@ pub(crate) struct CandidateConfig {
     /// Cluster name to select when this candidate is chosen.
     pub cluster: String,
 
+    /// Optional provider marker for provider-specific downstream filters.
+    #[serde(default)]
+    pub provider: Option<String>,
+
     /// Optional provider-specific model identifier written to the request
     /// body after this candidate is selected.
     #[serde(default)]
@@ -204,6 +208,9 @@ pub(crate) struct RouteCandidate {
 
     /// Cluster name to select.
     pub cluster: Arc<str>,
+
+    /// Optional provider marker for provider-specific downstream filters.
+    pub provider: Option<Arc<str>>,
 
     /// Optional provider-specific model identifier written to the request
     /// body after this candidate is selected.
@@ -311,6 +318,9 @@ fn validate_candidates_with_empty(
         validate_name(&format!("candidates[{i}].name"), &c.name)?;
         validate_name(&format!("candidates[{i}].site"), &c.site)?;
         validate_name(&format!("candidates[{i}].cluster"), &c.cluster)?;
+        if let Some(provider) = &c.provider {
+            validate_name(&format!("candidates[{i}].provider"), provider)?;
+        }
         if let Some(target_model) = &c.target_model {
             validate_name(&format!("candidates[{i}].target_model"), target_model)?;
         }
@@ -332,6 +342,7 @@ fn validate_candidates_with_empty(
         candidates.push(RouteCandidate {
             admission_state: AdmissionState::default(),
             cluster: Arc::from(c.cluster.as_str()),
+            provider: c.provider.map(|provider| Arc::from(provider.as_str())),
             target_model: c.target_model.map(|target| Arc::from(target.as_str())),
             paths,
             credential: c.credential,
@@ -747,6 +758,7 @@ mod tests {
         let kind: CapabilityKind = serde_yaml::from_str(&format!("\"{kind_str}\"")).unwrap();
         CandidateConfig {
             cluster: cluster.to_owned(),
+            provider: None,
             target_model: None,
             paths: None,
             credential: None,
