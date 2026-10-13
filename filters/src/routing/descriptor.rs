@@ -24,6 +24,9 @@ const MAX_CANDIDATES: usize = 1024;
 /// Maximum length for identifier strings.
 const MAX_NAME_LEN: usize = 256;
 
+/// Maximum request paths accepted for one target-model rewrite.
+const MAX_PATHS_PER_CANDIDATE: usize = 16;
+
 /// Header prefixes reserved for internal gateway/protocol metadata.
 pub(crate) const RESERVED_HEADER_PREFIXES: &[&str] = &["x-praxis-", "x-mcp-"];
 
@@ -144,6 +147,15 @@ pub(crate) struct CandidateConfig {
     /// Cluster name to select when this candidate is chosen.
     pub cluster: String,
 
+    /// Optional provider-specific model identifier written to the request
+    /// body after this candidate is selected.
+    #[serde(default)]
+    pub target_model: Option<String>,
+
+    /// Optional request paths on which `target_model` is applied.
+    #[serde(default)]
+    pub paths: Option<Vec<String>>,
+
     /// Optional final-hop credential reference.
     #[serde(default)]
     pub credential: Option<CandidateCredential>,
@@ -192,6 +204,13 @@ pub(crate) struct RouteCandidate {
 
     /// Cluster name to select.
     pub cluster: Arc<str>,
+
+    /// Optional provider-specific model identifier written to the request
+    /// body after this candidate is selected.
+    pub target_model: Option<Arc<str>>,
+
+    /// Optional request paths on which `target_model` is applied.
+    pub paths: Option<Vec<Arc<str>>>,
 
     /// Optional final-hop credential reference.
     pub credential: Option<CandidateCredential>,
@@ -292,6 +311,10 @@ fn validate_candidates_with_empty(
         validate_name(&format!("candidates[{i}].name"), &c.name)?;
         validate_name(&format!("candidates[{i}].site"), &c.site)?;
         validate_name(&format!("candidates[{i}].cluster"), &c.cluster)?;
+        if let Some(target_model) = &c.target_model {
+            validate_name(&format!("candidates[{i}].target_model"), target_model)?;
+        }
+        let paths = validate_paths(i, c.target_model.is_some(), c.paths)?;
         validate_credential(i, c.credential.as_ref())?;
 
         if !seen.insert((c.kind, c.name.clone(), c.site.clone(), c.cluster.clone())) {
@@ -309,6 +332,8 @@ fn validate_candidates_with_empty(
         candidates.push(RouteCandidate {
             admission_state: AdmissionState::default(),
             cluster: Arc::from(c.cluster.as_str()),
+            target_model: c.target_model.map(|target| Arc::from(target.as_str())),
+            paths,
             credential: c.credential,
             fresh: c.fresh,
             kind: c.kind,
@@ -323,6 +348,42 @@ fn validate_candidates_with_empty(
     }
 
     Ok(candidates)
+}
+
+/// Validate optional target-model rewrite paths.
+fn validate_paths(
+    index: usize,
+    has_target_model: bool,
+    paths: Option<Vec<String>>,
+) -> Result<Option<Vec<Arc<str>>>, FilterError> {
+    let Some(paths) = paths else {
+        return Ok(None);
+    };
+    if !has_target_model {
+        return Err(format!("routing: candidates[{index}].paths requires target_model").into());
+    }
+    if paths.is_empty() || paths.len() > MAX_PATHS_PER_CANDIDATE {
+        return Err(
+            format!("routing: candidates[{index}].paths must contain 1-{MAX_PATHS_PER_CANDIDATE} paths").into(),
+        );
+    }
+    let mut validated = Vec::with_capacity(paths.len());
+    for path in paths {
+        if !path.starts_with('/') || path.contains(['?', '#']) || path.len() > 512 {
+            return Err(format!(
+                "routing: candidates[{index}].paths entry must be an absolute path without query or fragment"
+            )
+            .into());
+        }
+        if validated
+            .iter()
+            .any(|configured: &Arc<str>| configured.as_ref() == path)
+        {
+            return Err(format!("routing: candidates[{index}].paths contains a duplicate path").into());
+        }
+        validated.push(Arc::from(path.as_str()));
+    }
+    Ok(Some(validated))
 }
 
 /// Validate credential reference fields on a candidate entry.
@@ -686,6 +747,8 @@ mod tests {
         let kind: CapabilityKind = serde_yaml::from_str(&format!("\"{kind_str}\"")).unwrap();
         CandidateConfig {
             cluster: cluster.to_owned(),
+            target_model: None,
+            paths: None,
             credential: None,
             fresh: true,
             kind,

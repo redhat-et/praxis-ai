@@ -275,6 +275,15 @@ pub(crate) struct OverlayCandidate {
     /// Upstream cluster identifier.
     pub(crate) cluster: String,
 
+    /// Optional provider-specific model identifier written to the request
+    /// body after this candidate is selected.
+    #[serde(default)]
+    pub(crate) target_model: Option<String>,
+
+    /// Optional request paths on which `target_model` is applied.
+    #[serde(default)]
+    pub(crate) paths: Option<Vec<String>>,
+
     /// Credential reference projected by the operator.
     ///
     /// Carried as bounded in-process metadata for `credential_inject`.
@@ -777,6 +786,8 @@ fn overlay_to_candidates(doc: &OverlayDocument, allow_empty: bool) -> Result<Vec
             let kind = CapabilityKind::from_overlay_str(&oc.kind)?;
             Ok(CandidateConfig {
                 cluster: oc.cluster.clone(),
+                target_model: oc.target_model.clone(),
+                paths: oc.paths.clone(),
                 credential: oc.credential.as_ref().map(|credential| CandidateCredential {
                     strategy: credential.strategy.clone(),
                     secret_ref: CredentialRef {
