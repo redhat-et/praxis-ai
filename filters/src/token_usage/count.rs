@@ -42,6 +42,7 @@ use super::{
     set_cache_token_usage, set_reasoning_token_usage, set_token_status_overflow, set_token_usage, streaming,
 };
 use crate::agentic::a2a::sse;
+use crate::llm_metrics;
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -590,6 +591,14 @@ fn publish_token_usage(ctx: &mut HttpFilterContext<'_>, usage: TokenUsage) {
     );
     set_cache_token_usage(ctx, usage.cache_read_tokens(), usage.cache_write_tokens());
     set_reasoning_token_usage(ctx, usage.reasoning_tokens());
+
+    llm_metrics::record_token_usage(
+        ctx,
+        usage.input_tokens(),
+        usage.output_tokens(),
+        usage.cache_read_tokens(),
+        usage.reasoning_tokens(),
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -646,11 +655,118 @@ fn process_sse_payload(ctx: &mut HttpFilterContext<'_>, payload: &[u8], provider
         return;
     }
 
+    record_tpot_delta(ctx);
+    record_finish_reason_once(ctx, payload);
+
     if try_complete_usage(ctx, payload, provider) {
         return;
     }
 
     try_partial_usage(ctx, payload, provider);
+}
+
+/// Metadata key for the last SSE delta timestamp (unix nanos), used to
+/// measure inter-delta decode time (TPOT).
+const META_TPOT_LAST: &str = "metrics.tpot_last_nanos";
+
+/// Metadata key guarding single-fire finish-reason recording.
+const META_FINISH_RECORDED: &str = "metrics.finish_reason_recorded";
+
+/// Record the elapsed time since the previous non-terminal SSE delta as a TPOT
+/// sample, then remember the current timestamp.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "nanosecond duration is recorded as seconds f64"
+)]
+fn record_tpot_delta(ctx: &mut HttpFilterContext<'_>) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+
+    if let Some(last) = ctx
+        .filter_metadata
+        .get(META_TPOT_LAST)
+        .and_then(|v| v.parse::<u128>().ok())
+    {
+        let delta_seconds = now.saturating_sub(last) as f64 / 1_000_000_000.0;
+        llm_metrics::record_tpot(ctx, delta_seconds);
+    }
+
+    ctx.filter_metadata
+        .insert(META_TPOT_LAST.to_owned(), now.to_string());
+}
+
+/// Record the first `finish_reason` observed on this stream.
+fn record_finish_reason_once(ctx: &mut HttpFilterContext<'_>, payload: &[u8]) {
+    if ctx.filter_metadata.contains_key(META_FINISH_RECORDED) {
+        return;
+    }
+    let Some(reason) = extract_finish_reason(payload) else {
+        return;
+    };
+    llm_metrics::record_finish_reason(ctx, &reason);
+    ctx.filter_metadata.insert(META_FINISH_RECORDED.to_owned(), reason);
+}
+
+/// Extract a string `finish_reason` from an SSE JSON payload (e.g. the final
+/// OpenAI Chat Completions delta's `"finish_reason":"stop"`).
+#[expect(
+    clippy::indexing_slicing,
+    reason = "bounded slicing over a byte buffer after explicit length checks"
+)]
+fn extract_finish_reason(payload: &[u8]) -> Option<String> {
+    const NEEDLE: &[u8] = b"\"finish_reason\"";
+    let start = find_subslice(payload, NEEDLE)?;
+    let mut rest = &payload[start + NEEDLE.len()..];
+    // Skip whitespace and the ':' separator.
+    rest = skip_json_separator(rest)?;
+    // Expect a quoted string value.
+    if rest.first() != Some(&b'"') {
+        return None;
+    }
+    rest = &rest[1..];
+    let end = rest.iter().position(|&b| b == b'"')?;
+    let value = std::str::from_utf8(&rest[..end]).ok()?;
+    if value.is_empty() {
+        return None;
+    }
+    Some(value.to_owned())
+}
+
+/// Skip ASCII whitespace and a single `:` before a JSON value.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "bounded slicing over a byte buffer after explicit length checks"
+)]
+fn skip_json_separator(mut rest: &[u8]) -> Option<&[u8]> {
+    while let Some(&first) = rest.first() {
+        if !first.is_ascii_whitespace() {
+            break;
+        }
+        rest = &rest[1..];
+    }
+    if rest.first() != Some(&b':') {
+        return None;
+    }
+    rest = &rest[1..];
+    while let Some(&first) = rest.first() {
+        if !first.is_ascii_whitespace() {
+            break;
+        }
+        rest = &rest[1..];
+    }
+    Some(rest)
+}
+
+/// Locate `needle` in `haystack`, returning the byte index of the match.
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 /// Try complete usage extraction (OpenAI, Google, Azure final events).

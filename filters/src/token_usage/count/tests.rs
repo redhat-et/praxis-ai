@@ -2038,3 +2038,233 @@ async fn run_sse_extraction_at(
         ctx.get_metadata("token.total").map(str::to_owned),
     )
 }
+
+// -----------------------------------------------------------------------------
+// LLM metrics emitted by `token_count`
+// -----------------------------------------------------------------------------
+
+use metrics::{SharedString, Unit};
+use metrics_util::CompositeKey;
+use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
+
+/// One snapshot row from the `DebuggingRecorder`.
+type SnapshotRow = (CompositeKey, Option<Unit>, Option<SharedString>, DebugValue);
+
+/// Run the full SSE cycle for a provider, wrapping `on_response_body` in a local
+/// recording scope so the emitted `praxis_ai_*` metrics can be snapshotted.
+async fn run_sse_with_metrics(provider: ProviderKind, path: &str, sse_bytes: &[u8]) -> Snapshotter {
+    let filter = make_filter(provider);
+    let req = crate::test_utils::make_request(http::Method::POST, path);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let mut resp = make_response_with_content_type("text/event-stream");
+    ctx.response_header = Some(&mut resp);
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || {
+        let mut body = Some(Bytes::copy_from_slice(sse_bytes));
+        drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+    });
+
+    snapshotter
+}
+
+/// Run the JSON extraction cycle with a local recorder.
+async fn run_json_with_metrics(provider: ProviderKind, body_bytes: &[u8]) -> Snapshotter {
+    let filter = make_filter(provider);
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let mut resp = make_response_with_content_type("application/json");
+    ctx.response_header = Some(&mut resp);
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || {
+        let mut body = Some(Bytes::copy_from_slice(body_bytes));
+        drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+    });
+
+    snapshotter
+}
+
+/// Snapshot into an owned vector.
+fn snapshot_vec(snapshotter: &Snapshotter) -> Vec<SnapshotRow> {
+    snapshotter.snapshot().into_vec()
+}
+
+/// Sum every counter sample for `name` that carries `want_label` (or any if None).
+fn counter_total(
+    snapshot: &[SnapshotRow],
+    name: &str,
+    want_label: Option<(&str, &str)>,
+) -> u64 {
+    snapshot
+        .iter()
+        .filter_map(|(key, _, _, value)| {
+            if key.key().name() != name {
+                return None;
+            }
+            if let Some((label, expected)) = want_label
+                && !key.key().labels().any(|l| l.key() == label && l.value() == expected)
+            {
+                return None;
+            }
+            match value {
+                DebugValue::Counter(count) => Some(count),
+                _ => None,
+            }
+        })
+        .sum()
+}
+
+/// Collect every histogram sample recorded for `name`.
+fn histogram_samples(snapshot: &[SnapshotRow], name: &str) -> Vec<f64> {
+    snapshot
+        .iter()
+        .filter_map(|(key, _, _, value)| {
+            if key.key().name() != name {
+                return None;
+            }
+            match value {
+                DebugValue::Histogram(samples) => Some(samples.iter().map(|v| v.into_inner()).collect::<Vec<_>>()),
+                _ => None,
+            }
+        })
+        .flatten()
+        .collect()
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "each assertion is a distinct metric contract"
+)]
+#[tokio::test]
+async fn metrics_sse_openai_records_tokens_and_finish_reason() {
+    let events = b"data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},\"finish_reason\":\"stop\"}]}\n\ndata: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\ndata: [DONE]\n\n";
+
+    let snapshotter = run_sse_with_metrics(ProviderKind::OpenAi, "/v1/chat/completions", events).await;
+    let snapshot = snapshot_vec(&snapshotter);
+
+    assert_eq!(
+        counter_total(&snapshot, "praxis_ai_prompt_tokens_total", None),
+        10,
+        "prompt token counter should sum to backend-reported input"
+    );
+    assert_eq!(
+        counter_total(&snapshot, "praxis_ai_output_tokens_total", None),
+        20,
+        "output token counter should sum to backend-reported output"
+    );
+    assert_eq!(
+        histogram_samples(&snapshot, "praxis_ai_prompt_tokens"),
+        vec![10.0],
+        "prompt tokens histogram should record 10"
+    );
+    assert_eq!(
+        histogram_samples(&snapshot, "praxis_ai_output_tokens"),
+        vec![20.0],
+        "output tokens histogram should record 20"
+    );
+    assert_eq!(
+        counter_total(&snapshot, "praxis_ai_finish_reasons_total", Some(("reason", "stop"))),
+        1,
+        "finish_reason stop should be recorded once"
+    );
+    assert_eq!(
+        counter_total(&snapshot, "praxis_ai_empty_completions_total", None),
+        0,
+        "non-empty completion should not count as empty"
+    );
+}
+
+#[tokio::test]
+async fn metrics_sse_openai_records_empty_completion() {
+    let events = b"data: {\"choices\":[{\"delta\":{\"content\":\"\"}}]}\n\ndata: {\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":0,\"total_tokens\":5}}\n\ndata: [DONE]\n\n";
+
+    let snapshotter = run_sse_with_metrics(ProviderKind::OpenAi, "/v1/chat/completions", events).await;
+    let snapshot = snapshot_vec(&snapshotter);
+
+    assert_eq!(
+        counter_total(&snapshot, "praxis_ai_empty_completions_total", None),
+        1,
+        "zero-output completion should increment empty_completions"
+    );
+    assert_eq!(
+        counter_total(&snapshot, "praxis_ai_output_tokens_total", None),
+        0,
+        "no output tokens reported"
+    );
+}
+
+#[tokio::test]
+async fn metrics_sse_openai_records_tpot_on_multiple_deltas() {
+    // Two content deltas before the terminal usage event give one inter-delta
+    // (TPOT) sample.
+    let events = b"data: {\"choices\":[{\"delta\":{\"content\":\"A\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"B\"}}]}\n\ndata: {\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n";
+
+    let snapshotter = run_sse_with_metrics(ProviderKind::OpenAi, "/v1/chat/completions", events).await;
+    let snapshot = snapshot_vec(&snapshotter);
+
+    let tpot = histogram_samples(&snapshot, "praxis_ai_tpot_seconds");
+    assert_eq!(tpot.len(), 2, "three non-terminal events should yield two inter-event samples");
+    assert!(tpot.iter().all(|t| *t >= 0.0), "TPOT must be non-negative");
+}
+
+#[tokio::test]
+async fn metrics_json_anthropic_records_cache_tokens() {
+    let json = br#"{"usage":{"input_tokens":50,"output_tokens":100,"cache_read_input_tokens":5000}}"#;
+
+    let snapshotter = run_json_with_metrics(ProviderKind::Anthropic, json).await;
+    let snapshot = snapshot_vec(&snapshotter);
+
+    assert_eq!(
+        counter_total(&snapshot, "praxis_ai_cache_read_tokens_total", None),
+        5000,
+        "cache-read tokens should be recorded"
+    );
+    assert_eq!(
+        counter_total(&snapshot, "praxis_ai_prompt_tokens_total", None),
+        5050,
+        "input tokens include cache-read class"
+    );
+}
+
+#[tokio::test]
+async fn metrics_carry_model_and_cluster_labels() {
+    let json = br#"{"usage":{"input_tokens":1,"output_tokens":2}}"#;
+
+    let filter = make_filter(ProviderKind::Anthropic);
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.set_metadata("anthropic_messages_format.model", "claude-test");
+
+    let mut resp = make_response_with_content_type("application/json");
+    ctx.response_header = Some(&mut resp);
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || {
+        let mut body = Some(Bytes::copy_from_slice(json));
+        drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+    });
+    let snapshot = snapshot_vec(&snapshotter);
+
+    assert_eq!(
+        counter_total(&snapshot, "praxis_ai_prompt_tokens_total", Some(("model", "claude-test"))),
+        1,
+        "metric should carry the resolved model label"
+    );
+    assert_eq!(
+        counter_total(&snapshot, "praxis_ai_prompt_tokens_total", Some(("cluster", "unknown"))),
+        1,
+        "metric should carry a cluster label (unknown when unset)"
+    );
+}
