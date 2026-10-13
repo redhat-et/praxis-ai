@@ -928,7 +928,11 @@ impl HttpFilter for IntelligentRouteFilter {
         let (action, kind) = if ctx.cluster.is_some() {
             (FilterAction::Continue, None)
         } else {
-            let Lookup::Route { kind, name } = extract_lookup(ctx, &self.model_header) else {
+            let lookup = match extract_lookup(ctx, &self.model_header) {
+                Lookup::Skip => extract_body_model_lookup(body),
+                other => other,
+            };
+            let Lookup::Route { kind, name } = lookup else {
                 return Ok(FilterAction::Continue);
             };
             let action = self.select_and_route(ctx, &snap, kind, &name)?;
@@ -940,6 +944,31 @@ impl HttpFilter for IntelligentRouteFilter {
             self.rewrite_selected_model(ctx, body, &snap)?;
         }
         Ok(action)
+    }
+}
+
+/// Extract the public model directly from the buffered request body.
+///
+/// `model_to_header` promotes the value by queuing an outbound header update;
+/// that update is intentionally not visible in `ctx.request.headers` during
+/// the same body pass. Reading the body here lets intelligent_route select the
+/// candidate before forwarding without trusting a client-supplied header.
+fn extract_body_model_lookup(body: &Option<Bytes>) -> Lookup {
+    let Some(raw) = body.as_ref() else {
+        return Lookup::Skip;
+    };
+    let Ok(value) = serde_json::from_slice::<Value>(raw) else {
+        return Lookup::Skip;
+    };
+    let Some(model) = value.get("model").and_then(Value::as_str) else {
+        return Lookup::Skip;
+    };
+    if model.trim().is_empty() || model.len() > MAX_HEADER_VALUE_LEN {
+        return Lookup::Invalid;
+    }
+    Lookup::Route {
+        kind: CapabilityKind::InferenceModel,
+        name: model.to_owned(),
     }
 }
 
@@ -2232,6 +2261,24 @@ mod tests {
             ctx.get_metadata(MODEL_PROVIDER_CLIENT_MODEL_METADATA),
             Some("public-model")
         );
+    }
+
+    #[tokio::test]
+    async fn body_model_routes_when_promotion_header_is_not_yet_visible() {
+        let filter = parse(
+            "local_site: site-a\ncandidates:\n  - kind: inference_model\n    name: public-model\n    site: site-a\n    cluster: vertex\n    target_model: vertex/internal-model\n    paths: [/v1/messages]\n",
+        )
+        .unwrap();
+        let req = crate::test_utils::make_request(Method::POST, "/v1/messages");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let mut body = Some(Bytes::from(r#"{"model":"public-model","messages":[]}"#));
+
+        let _unused = filter.on_request(&mut ctx).await.unwrap();
+        let _unused = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+        assert_eq!(ctx.cluster.as_deref(), Some("vertex"));
+        let rewritten: Value = serde_json::from_slice(body.as_ref().unwrap()).unwrap();
+        assert_eq!(rewritten["model"], "vertex/internal-model");
     }
 
     #[tokio::test]
