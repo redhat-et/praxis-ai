@@ -58,6 +58,10 @@ pub(crate) const ROUTE_SELECTION_TIER: &str = "intelligent_route.selection_tier"
 pub(crate) const ROUTE_SITE: &str = "intelligent_route.site";
 /// Stable identifier for the selected candidate.
 pub(crate) const ROUTE_STABLE_ID: &str = "intelligent_route.stable_id";
+/// Provider-specific model selected from the same immutable route snapshot.
+pub(crate) const ROUTE_TARGET_MODEL: &str = "intelligent_route.target_model";
+/// Comma-separated request paths eligible for the selected target model.
+pub(crate) const ROUTE_TARGET_PATHS: &str = "intelligent_route.target_paths";
 /// Hop request ID forwarded to the provider gateway.
 pub(crate) const ROUTE_PROVIDER_HOP_REQUEST_ID: &str = "intelligent_route.provider_hop_request_id";
 

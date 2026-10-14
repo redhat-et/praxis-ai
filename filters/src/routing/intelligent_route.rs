@@ -47,8 +47,8 @@ use super::{
     metadata::{
         OVERLAY_REVISION_HEADER, PROVIDER_HOP_REQUEST_ID_HEADER, ROUTE_ADMISSION_STATE, ROUTE_CLUSTER, ROUTE_KIND,
         ROUTE_LOCAL_SITE, ROUTE_NAME, ROUTE_PROVIDER_HOP_REQUEST_ID, ROUTE_RANK, ROUTE_SELECTION_GROUP,
-        ROUTE_SELECTION_MODE, ROUTE_SELECTION_TIER, ROUTE_SITE, ROUTE_STABLE_ID, SELECTED_CANDIDATE_HEADER,
-        set_credential_metadata,
+        ROUTE_SELECTION_MODE, ROUTE_SELECTION_TIER, ROUTE_SITE, ROUTE_STABLE_ID, ROUTE_TARGET_MODEL,
+        ROUTE_TARGET_PATHS, SELECTED_CANDIDATE_HEADER, set_credential_metadata,
     },
     overlay::{self, ExpectedOverlayScope, OverlayReloadHandle, PickerPolicy, RouteSnapshot},
     picker,
@@ -542,6 +542,7 @@ impl IntelligentRouteFilter {
             );
         } else {
             tracing::debug!(path = %path, "intelligent_route: management path; skipping model resolution");
+            ctx.set_metadata("intelligent_route.management_skip", "true");
         }
         Some(FilterAction::Continue)
     }
@@ -554,29 +555,16 @@ impl IntelligentRouteFilter {
         &self,
         ctx: &mut HttpFilterContext<'_>,
         body: &mut Option<Bytes>,
-        snap: &RouteSnapshot,
     ) -> Result<(), FilterError> {
         let Some(raw) = body.as_ref() else {
             return Ok(());
         };
-        let Some(stable_id) = ctx.get_metadata(ROUTE_STABLE_ID) else {
-            return Ok(());
-        };
-        let Some(candidate) = snap
-            .candidates
-            .iter()
-            .find(|candidate| candidate.stable_id.as_ref() == stable_id)
-        else {
-            return Ok(());
-        };
-        let Some(target_model) = &candidate.target_model else {
+        let Some(target_model) = ctx.get_metadata(ROUTE_TARGET_MODEL).map(str::to_owned) else {
             return Ok(());
         };
         let path = ctx.request.uri.path();
-        if candidate
-            .paths
-            .as_ref()
-            .is_some_and(|paths| !paths.iter().any(|configured| configured.as_ref() == path))
+        if let Some(paths) = ctx.get_metadata(ROUTE_TARGET_PATHS)
+            && !paths.split(',').any(|configured| configured == path)
         {
             return Ok(());
         }
@@ -590,8 +578,8 @@ impl IntelligentRouteFilter {
             return Ok(());
         };
         ctx.set_metadata(MODEL_PROVIDER_CLIENT_MODEL_METADATA, client_model);
-        if object.get("model").and_then(Value::as_str) != Some(target_model.as_ref()) {
-            object.insert("model".to_owned(), Value::String(target_model.to_string()));
+        if object.get("model").and_then(Value::as_str) != Some(target_model.as_str()) {
+            object.insert("model".to_owned(), Value::String(target_model));
             replace_json_body(body, &value, self.name(), "model").map_err(|error| {
                 FilterError::from(format!("intelligent_route: request serialization failed: {error}"))
             })?;
@@ -924,6 +912,9 @@ impl HttpFilter for IntelligentRouteFilter {
         if !end_of_stream {
             return Ok(FilterAction::Continue);
         }
+        if ctx.get_metadata("intelligent_route.management_skip") == Some("true") {
+            return Ok(FilterAction::Continue);
+        }
         let snap = self.snapshot.load();
         let (action, kind) = if ctx.cluster.is_some() {
             (FilterAction::Continue, None)
@@ -941,7 +932,7 @@ impl HttpFilter for IntelligentRouteFilter {
         let inference_route = kind == Some(CapabilityKind::InferenceModel)
             || ctx.get_metadata(ROUTE_KIND) == Some(CapabilityKind::InferenceModel.as_str());
         if matches!(action, FilterAction::Continue) && inference_route {
-            self.rewrite_selected_model(ctx, body, &snap)?;
+            self.rewrite_selected_model(ctx, body)?;
         }
         Ok(action)
     }
@@ -1261,6 +1252,15 @@ fn record_route_decision(ctx: &mut HttpFilterContext<'_>, local_site: &Arc<str>,
     ctx.set_metadata(ROUTE_NAME, &*candidate.name);
     ctx.set_metadata(ROUTE_SITE, &*candidate.site);
     ctx.set_metadata(ROUTE_STABLE_ID, &*candidate.stable_id);
+    if let Some(target_model) = &candidate.target_model {
+        ctx.set_metadata(ROUTE_TARGET_MODEL, target_model.as_ref());
+        if let Some(paths) = &candidate.paths {
+            ctx.set_metadata(
+                ROUTE_TARGET_PATHS,
+                paths.iter().map(|path| path.as_ref()).collect::<Vec<_>>().join(","),
+            );
+        }
+    }
     if candidate.kind == CapabilityKind::InferenceModel {
         if let Some(provider) = &candidate.provider
             && let Ok(provider) = HeaderValue::from_str(provider.as_ref())

@@ -122,6 +122,12 @@ impl HttpFilter for ModelToHeaderFilter {
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        // Remove the client-supplied promotion header before any later header
+        // phase filter (notably intelligent_route) can consume it. The
+        // trusted body-derived value is added during on_request_body.
+        if !ctx.request_headers_to_remove.contains(&self.header) {
+            ctx.request_headers_to_remove.push(self.header.clone());
+        }
         self.inner.on_request(ctx).await
     }
 
