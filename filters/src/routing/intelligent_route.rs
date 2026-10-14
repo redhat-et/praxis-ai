@@ -123,6 +123,12 @@ struct IntelligentRouteConfig {
     #[serde(default = "default_model_header")]
     model_header: String,
 
+    /// Resolve inference model routing from the request body during the body
+    /// phase. This prevents a client-supplied model header from selecting a
+    /// backend before model_to_header has inspected the body.
+    #[serde(default)]
+    body_authoritative: bool,
+
     /// Request-path prefixes that bypass model resolution entirely.
     ///
     /// Management and discovery endpoints (model listing, subscriptions,
@@ -467,6 +473,7 @@ pub struct IntelligentRouteFilter {
     provider_hop_clusters: BTreeSet<String>,
     /// Header that carries the model name.
     model_header: HeaderName,
+    body_authoritative: bool,
     /// Management/discovery path prefixes that bypass model resolution.
     skip_paths: Vec<Arc<str>>,
     /// Cluster that serves skipped management paths (None = leave untouched).
@@ -508,6 +515,7 @@ impl IntelligentRouteFilter {
 
         Ok(Box::new(Self {
             model_header,
+            body_authoritative: cfg.body_authoritative,
             skip_paths,
             management_cluster,
             _reload_handle: reload_handle,
@@ -533,6 +541,7 @@ impl IntelligentRouteFilter {
             tracing::debug!(path = %path, "intelligent_route: management path but cluster already set; preserving");
             return Some(FilterAction::Continue);
         }
+
         if let Some(cluster) = &self.management_cluster {
             ctx.cluster = Some(Arc::clone(cluster));
             tracing::debug!(
@@ -891,6 +900,10 @@ impl HttpFilter for IntelligentRouteFilter {
             return Ok(FilterAction::Continue);
         }
 
+        if self.body_authoritative && ctx.get_metadata("mcp.method").is_none() {
+            return Ok(FilterAction::Continue);
+        }
+
         let snap = self.snapshot.load();
         let lookup = extract_lookup(ctx, &self.model_header);
 
@@ -912,6 +925,9 @@ impl HttpFilter for IntelligentRouteFilter {
         if !end_of_stream {
             return Ok(FilterAction::Continue);
         }
+        if let Some(action) = self.try_management_skip(ctx) {
+            return Ok(action);
+        }
         if ctx.get_metadata("intelligent_route.management_skip") == Some("true") {
             return Ok(FilterAction::Continue);
         }
@@ -919,9 +935,13 @@ impl HttpFilter for IntelligentRouteFilter {
         let (action, kind) = if ctx.cluster.is_some() {
             (FilterAction::Continue, None)
         } else {
-            let lookup = match extract_lookup(ctx, &self.model_header) {
-                Lookup::Skip => extract_body_model_lookup(body),
-                other => other,
+            let lookup = if self.body_authoritative && ctx.get_metadata("mcp.method").is_none() {
+                extract_body_model_lookup(body)
+            } else {
+                match extract_lookup(ctx, &self.model_header) {
+                    Lookup::Skip => extract_body_model_lookup(body),
+                    other => other,
+                }
             };
             let Lookup::Route { kind, name } = lookup else {
                 return Ok(FilterAction::Continue);
@@ -2425,6 +2445,7 @@ mod tests {
         let shared = Arc::new(ArcSwap::from_pointee(make_snapshot("cluster-v1")));
         let filter = IntelligentRouteFilter {
             model_header: HeaderName::from_static("x-model"),
+            body_authoritative: false,
             _reload_handle: None,
             skip_paths: Vec::new(),
             management_cluster: None,
@@ -2579,6 +2600,7 @@ mod tests {
         )));
         let filter = IntelligentRouteFilter {
             model_header: HeaderName::from_static("x-model"),
+            body_authoritative: false,
             _reload_handle: None,
             skip_paths: Vec::new(),
             management_cluster: None,
@@ -3285,6 +3307,7 @@ mod tests {
         )])));
         let filter = IntelligentRouteFilter {
             model_header: HeaderName::from_static("x-model"),
+            body_authoritative: false,
             _reload_handle: None,
             skip_paths: Vec::new(),
             management_cluster: None,
@@ -3477,6 +3500,7 @@ mod tests {
         let shared = Arc::new(ArcSwap::from_pointee(snap));
         let filter = IntelligentRouteFilter {
             model_header: HeaderName::from_static("x-model"),
+            body_authoritative: false,
             _reload_handle: None,
             skip_paths: Vec::new(),
             management_cluster: None,
@@ -3754,6 +3778,7 @@ mod tests {
     ) -> IntelligentRouteFilter {
         IntelligentRouteFilter {
             model_header: HeaderName::from_static("x-model"),
+            body_authoritative: false,
             _reload_handle: None,
             skip_paths: Vec::new(),
             management_cluster: None,

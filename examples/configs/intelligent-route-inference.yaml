@@ -38,6 +38,7 @@ filter_chains:
       - filter: intelligent_route
         local_site: site-a
         model_header: X-Model
+        body_authoritative: true
         candidates:
           - kind: inference_model
             name: granite-3.3-8b
