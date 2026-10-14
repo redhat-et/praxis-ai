@@ -6,6 +6,7 @@
 use http::Method;
 use praxis_filter::FilterAction;
 use serde_json::Value;
+use tempfile::tempdir;
 
 use super::ModelCatalogFilter;
 use crate::test_utils::{make_filter_context, make_request};
@@ -179,6 +180,25 @@ models:
         vec!["llama-3.1-8b-instruct", "mistral-7b-instruct", "claude-internal"],
         "all configured models should be listed in declaration order"
     );
+}
+
+#[tokio::test]
+async fn overlay_catalog_projects_only_matching_dialect() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("routing-overlay.json");
+    std::fs::write(
+        &path,
+        r#"{"local_site":"test","candidates":[
+          {"kind":"inference_model","name":"chat-model","cluster":"openai","catalog":["openai"]},
+          {"kind":"inference_model","name":"both-model","cluster":"hosted","catalog":["openai","anthropic"]},
+          {"kind":"inference_model","name":"hidden-model","cluster":"x"}
+        ]}"#,
+    )
+    .unwrap();
+    let filter = make_filter(&format!("format: openai\noverlay_file: {:?}\n", path));
+    let body = terminal_body(run(&*filter, Method::GET, "/v1/models").await);
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(ids(&value), vec!["chat-model", "both-model"]);
 }
 
 // -----------------------------------------------------------------------------

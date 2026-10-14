@@ -39,6 +39,7 @@ const DEFAULT_IDENTITY_METADATA_NAMESPACE: &str = "identity";
 /// default_username: "anonymous"
 /// default_model: "unknown"
 /// model_policy_check: false
+/// model_policy_fail_open: true
 /// ```
 #[derive(Debug, Deserialize)]
 #[expect(
@@ -111,6 +112,12 @@ pub(super) struct ExternalMeteringConfig {
     /// service enforces per-user model allowlists.
     #[serde(default)]
     pub model_policy_check: bool,
+
+    /// Whether an unavailable metering service may bypass the model-policy
+    /// decision. This is independent from `fail_open`, which controls the
+    /// ordinary entitlement/budget check.
+    #[serde(default = "default_true")]
+    pub model_policy_fail_open: bool,
 }
 
 /// Validate config at construction time.
@@ -138,6 +145,10 @@ pub(super) fn validate_config(cfg: &ExternalMeteringConfig) -> Result<(), Filter
 
     if cfg.identity_metadata_namespace.is_empty() {
         return Err("external_metering: identity_metadata_namespace must not be empty".into());
+    }
+
+    if !cfg.model_policy_fail_open && !cfg.model_policy_check {
+        return Err("external_metering: model_policy_fail_open=false requires model_policy_check=true".into());
     }
 
     Ok(())

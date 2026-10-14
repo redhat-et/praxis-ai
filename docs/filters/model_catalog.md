@@ -7,7 +7,15 @@ Serves a configured model list as a terminal response to `GET {path}`.
 
 ## Configuration Notes
 
-Discovery only: it advertises what the gateway exposes. Authorization stays with `model_access`; this filter does not enforce access.
+Discovery only: it advertises what the gateway exposes. Authorization is owned
+by the gateway's metering policy preflight; this filter does not enforce access.
+
+For routing-overlay deployments, use `overlay_file` instead of `models`. The
+overlay candidate's `catalog` field controls whether a model appears in the
+OpenAI and/or Anthropic envelope; `display_name`, `owned_by`, and `created`
+provide optional discovery metadata. Overlay updates are reloaded without a
+proxy restart, keeping `/v1/models` and intelligent routing on one source of
+truth. `models` remains available for static profiles.
 
 ## Configuration
 

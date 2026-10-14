@@ -288,6 +288,23 @@ pub(crate) struct OverlayCandidate {
     #[serde(default)]
     pub(crate) paths: Option<Vec<String>>,
 
+    /// Discovery envelopes in which this candidate should be advertised.
+    /// Valid values are `openai` and `anthropic`.
+    #[serde(default)]
+    pub(crate) catalog: Option<Vec<String>>,
+
+    /// Optional discovery display name.
+    #[serde(default)]
+    pub(crate) display_name: Option<String>,
+
+    /// Optional discovery owner label.
+    #[serde(default)]
+    pub(crate) owned_by: Option<String>,
+
+    /// Optional discovery creation timestamp.
+    #[serde(default)]
+    pub(crate) created: Option<i64>,
+
     /// Credential reference projected by the operator.
     ///
     /// Carried as bounded in-process metadata for `credential_inject`.
@@ -793,6 +810,10 @@ fn overlay_to_candidates(doc: &OverlayDocument, allow_empty: bool) -> Result<Vec
                 provider: oc.provider.clone(),
                 target_model: oc.target_model.clone(),
                 paths: oc.paths.clone(),
+                catalog: oc.catalog.clone(),
+                display_name: oc.display_name.clone(),
+                owned_by: oc.owned_by.clone(),
+                created: oc.created,
                 credential: oc.credential.as_ref().map(|credential| CandidateCredential {
                     strategy: credential.strategy.clone(),
                     secret_ref: CredentialRef {

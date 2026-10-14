@@ -38,10 +38,23 @@ mod config;
 )]
 mod tests;
 
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::Duration,
+};
+
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use praxis_filter::{
     BodyAccess, FilterAction, FilterError, HttpFilter, HttpFilterContext, TerminalResponse, parse_filter_config,
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::debug;
 
@@ -52,6 +65,7 @@ use self::config::{CatalogFormat, ModelCatalogConfig, ModelEntry, validate_confi
 // -----------------------------------------------------------------------------
 
 /// A compiled catalog entry ready to render.
+#[derive(Clone)]
 struct CatalogModel {
     /// Model identifier returned to clients.
     id: String,
@@ -120,7 +134,10 @@ pub struct ModelCatalogFilter {
     path: String,
 
     /// Advertised models, in declaration order.
-    models: Vec<CatalogModel>,
+    models: Arc<ArcSwap<Vec<CatalogModel>>>,
+
+    /// Polling watcher for an overlay-backed catalog.
+    _reload_handle: Option<CatalogReloadHandle>,
 }
 
 impl ModelCatalogFilter {
@@ -133,22 +150,142 @@ impl ModelCatalogFilter {
         let cfg: ModelCatalogConfig = parse_filter_config("model_catalog", value)?;
         validate_config(&cfg).map_err(|e| -> FilterError { e.into() })?;
 
-        let models = cfg.models.into_iter().map(CatalogModel::compile).collect();
+        let (models, reload_handle) = if let Some(entries) = cfg.models {
+            (
+                Arc::new(ArcSwap::from_pointee(
+                    entries.into_iter().map(CatalogModel::compile).collect(),
+                )),
+                None,
+            )
+        } else {
+            let path = cfg
+                .overlay_file
+                .ok_or_else(|| FilterError::from("model_catalog: overlay_file is required"))?;
+            let initial = load_overlay_catalog(&path, cfg.format)?;
+            let models = Arc::new(ArcSwap::from_pointee(initial));
+            let handle = CatalogReloadHandle::spawn(path, cfg.format, Arc::clone(&models))?;
+            (models, Some(handle))
+        };
 
         Ok(Box::new(Self {
             format: cfg.format,
             path: cfg.path,
             models,
+            _reload_handle: reload_handle,
         }))
     }
 
     /// Render the catalog body.
     fn render(&self) -> Vec<u8> {
         let value = match self.format {
-            CatalogFormat::Openai => render_openai(&self.models),
-            CatalogFormat::Anthropic => render_anthropic(&self.models),
+            CatalogFormat::Openai => render_openai(&self.models.load()),
+            CatalogFormat::Anthropic => render_anthropic(&self.models.load()),
         };
         serde_json::to_vec(&value).unwrap_or_else(|_| b"{}".to_vec())
+    }
+}
+
+/// Overlay candidate fields used for discovery. Unknown fields remain
+/// forward-compatible with the routing overlay contract.
+#[derive(Debug, Deserialize)]
+struct OverlayCandidate {
+    name: String,
+    #[serde(default)]
+    catalog: Option<Vec<String>>,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    owned_by: Option<String>,
+    #[serde(default)]
+    created: Option<i64>,
+}
+
+/// Load an overlay-backed catalog from either legacy or envelope JSON.
+fn load_overlay_catalog(path: &Path, format: CatalogFormat) -> Result<Vec<CatalogModel>, FilterError> {
+    let content = fs::read_to_string(path)
+        .map_err(|error| FilterError::from(format!("model_catalog: failed to read {}: {error}", path.display())))?;
+    let value: Value = serde_json::from_str(&content)
+        .map_err(|error| FilterError::from(format!("model_catalog: invalid overlay JSON: {error}")))?;
+    let candidates = value
+        .get("overlay")
+        .and_then(|overlay| overlay.get("candidates"))
+        .or_else(|| value.get("candidates"))
+        .ok_or_else(|| FilterError::from("model_catalog: overlay has no candidates"))?;
+    let candidates: Vec<OverlayCandidate> = serde_json::from_value(candidates.clone())
+        .map_err(|error| FilterError::from(format!("model_catalog: invalid overlay candidates: {error}")))?;
+    let dialect = match format {
+        CatalogFormat::Openai => "openai",
+        CatalogFormat::Anthropic => "anthropic",
+    };
+    let mut seen = std::collections::HashSet::new();
+    Ok(candidates
+        .into_iter()
+        .filter(|candidate| {
+            candidate
+                .catalog
+                .as_ref()
+                .is_some_and(|catalog| catalog.iter().any(|v| v == dialect))
+        })
+        .filter(|candidate| seen.insert(candidate.name.clone()))
+        .map(|candidate| CatalogModel {
+            display_name: candidate.display_name.unwrap_or_else(|| candidate.name.clone()),
+            owned_by: candidate.owned_by.unwrap_or_else(|| "praxis".to_owned()),
+            created: candidate.created.unwrap_or_default(),
+            id: candidate.name,
+        })
+        .collect())
+}
+
+/// Small polling watcher suitable for a projected ConfigMap file. Polling is
+/// deliberate: it follows ConfigMap symlink replacement without requiring a
+/// `subPath` mount and keeps the catalog watcher independent from routing's
+/// private watcher implementation.
+struct CatalogReloadHandle {
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl CatalogReloadHandle {
+    fn spawn(
+        path: PathBuf,
+        format: CatalogFormat,
+        models: Arc<ArcSwap<Vec<CatalogModel>>>,
+    ) -> Result<Self, FilterError> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let initial = fs::read(&path)
+            .map_err(|error| FilterError::from(format!("model_catalog: failed to read {}: {error}", path.display())))?;
+        let handle = thread::Builder::new()
+            .name("model-catalog-reload".to_owned())
+            .spawn(move || {
+                let mut previous = initial;
+                while !thread_stop.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(500));
+                    let Ok(current) = fs::read(&path) else { continue };
+                    if current == previous { continue }
+                    if let Ok(next) = load_overlay_catalog(&path, format) {
+                        models.store(Arc::new(next));
+                        previous = current;
+                        tracing::info!(path = %path.display(), "model_catalog: overlay reloaded");
+                    } else {
+                        tracing::warn!(path = %path.display(), "model_catalog: rejected overlay reload; retaining previous catalog");
+                    }
+                }
+            })
+            .map_err(|error| FilterError::from(format!("model_catalog: watcher startup failed: {error}")))?;
+        Ok(Self {
+            stop,
+            thread: Some(handle),
+        })
+    }
+}
+
+impl Drop for CatalogReloadHandle {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.thread.take() {
+            drop(handle.join());
+        }
     }
 }
 

@@ -146,7 +146,6 @@ see the [Praxis core filter reference][core-ref].
 
 | Filter | Description |
 |--------|-------------|
-| [`model_access`](model_access.md) | Enforces model access control by checking the `model` field in the JSON request body against configured rules. |
 
 ### Model Catalog
 

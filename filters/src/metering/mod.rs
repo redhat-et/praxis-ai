@@ -151,6 +151,7 @@ const STATUS_METERING_UNAVAILABLE: u16 = 503;
 /// default_username: "anonymous"
 /// default_model: "unknown"
 /// model_policy_check: false
+/// model_policy_fail_open: true
 /// ```
 pub struct ExternalMeteringFilter {
     /// Connect-time policy for the metering endpoint. Rejects non-public
@@ -164,6 +165,9 @@ pub struct ExternalMeteringFilter {
     /// Whether to pre-read request JSON so the entitlement check sees the
     /// public model before forwarding the body upstream.
     model_policy_check: bool,
+
+    /// Whether an unavailable metering service may bypass model policy.
+    model_policy_fail_open: bool,
 
     /// Username reported when no identity header is present. When unset,
     /// unidentified requests are not metered at all.
@@ -251,6 +255,7 @@ impl ExternalMeteringFilter {
             address_policy: AddressPolicy::from_allow_private(cfg.allow_private_endpoint),
             default_model: cfg.default_model,
             model_policy_check: cfg.model_policy_check,
+            model_policy_fail_open: cfg.model_policy_fail_open,
             default_username: cfg.default_username,
             fail_open: cfg.fail_open,
             feature_key: cfg.feature_key,
@@ -306,6 +311,10 @@ impl ExternalMeteringFilter {
 
     /// Resolve the action to take when the balance check cannot be completed.
     fn on_metering_unavailable(&self) -> FilterAction {
+        if self.model_policy_check && !self.model_policy_fail_open {
+            debug!("rejecting request because model policy is unavailable");
+            return reject_model_not_allowed();
+        }
         if self.fail_open {
             trace!("admitting request (fail-open)");
             FilterAction::Continue
