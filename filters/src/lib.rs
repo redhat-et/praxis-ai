@@ -17,7 +17,6 @@ pub mod aws;
 pub mod azure;
 #[cfg(feature = "http-callout-filter")]
 pub mod callout;
-mod content_normalize;
 #[cfg(feature = "gcp-adc-filter")]
 pub mod gcp;
 pub mod guardrails;
@@ -29,7 +28,6 @@ pub mod model_catalog;
 #[cfg(feature = "opentelemetry")]
 mod opentelemetry;
 pub mod prompt_enrich;
-mod reasoning_effort_map;
 mod register;
 mod reject_upgrade;
 pub mod routing;
@@ -49,7 +47,6 @@ pub use aws::Sigv4SignFilter;
 pub use azure::AzureAdFilter;
 #[cfg(feature = "http-callout-filter")]
 pub use callout::HttpCalloutFilter;
-pub use content_normalize::ContentNormalizeFilter;
 #[cfg(feature = "gcp-adc-filter")]
 pub use gcp::GcpAdcFilter;
 pub use guardrails::AiGuardrailsFilter;
@@ -59,7 +56,6 @@ pub use metering::ExternalMeteringFilter;
 pub use model_access::ModelAccessFilter;
 pub use model_catalog::ModelCatalogFilter;
 pub use prompt_enrich::PromptEnrichFilter;
-pub use reasoning_effort_map::ReasoningEffortMapFilter;
 pub use register::{build_ai_registry, install_pipeline_extensions, register_ai_filters};
 pub use reject_upgrade::RejectUpgradeFilter;
 pub use routing::{CredentialInjectFilter, IntelligentRouteFilter, ProviderRouteFilter};

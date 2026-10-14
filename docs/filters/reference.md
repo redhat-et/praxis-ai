@@ -109,7 +109,6 @@ see the [Praxis core filter reference][core-ref].
 
 | Filter | Description |
 |--------|-------------|
-| [`content_normalize`](content_normalize.md) | Normalizes Anthropic content block types for vLLM/Qwen compatibility. |
 
 ### GCP
 
@@ -165,7 +164,6 @@ see the [Praxis core filter reference][core-ref].
 
 | Filter | Description |
 |--------|-------------|
-| [`reasoning_effort_map`](reasoning_effort_map.md) | Rewrites `reasoning_effort` / `reasoning.effort` for configured models so clients can send effort values the backend rejects. |
 
 ### Reject Upgrade
 

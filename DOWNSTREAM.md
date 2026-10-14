@@ -6,11 +6,11 @@ and the build source for EnMaaS Praxis images. Runtime configuration, manifests,
 Secret mounts, and credentials remain in
 https://github.com/redhat-et/pricetag.
 
-**Snapshot date:** 2026-10-13
-**ET main:** `0b35bf3ebdff0d5d924f8346c917f42440defc1f` (PR #10)
-**Upstream main:** `eacf145cdb6aabacb57f3441fd6d37a610ca9152`
-**ET base:** Praxis crates 0.7.3; upstream main has moved to 0.7.4
-**Divergence:** 46 ET-only commits and 109 upstream-only commits at this snapshot
+**Snapshot date:** 2026-10-14
+**ET main:** `99353a6bf8ef0fc378bc637f9fd66d78c65f1895` (PR #11)
+**Upstream main:** `d5b05be0fb59c1973c21e0b7a9ed779462fb0321` (0.7.4)
+**ET base:** Praxis crates 0.7.3; ET is not yet rebased onto upstream 0.7.4
+**Divergence:** 47 ET-only commits and 175 upstream-only commits at this snapshot
 
 This is a point-in-time compatibility inventory, not a claim that ET `main` is
 fully rebased onto the latest upstream. Re-run the comparison after every
@@ -28,7 +28,7 @@ the ET-only filters and ported the reviewed behavior for:
 
 - API-key authentication and tenant identity metadata
 - group/model access policy and model catalog
-- content normalization and reasoning-effort mapping
+- API compatibility filters that were later retired from the EnMaaS target
 - upgrade rejection on unmetered connection upgrades
 - GCP cluster-scoped credentials and Vertex Anthropic routing
 - model-to-provider routing and PriceTag metering integration
@@ -61,11 +61,10 @@ configuration, not this source repository alone.
 | `api_key_auth` | Validate MaaS API keys and publish tenant identity | `filters/src/api_key_auth/` | No equivalent in upstream main | Keep ET-only |
 | `model_access` | Enforce group/model access policy | `filters/src/model_access/` | No equivalent in upstream main | Keep ET-only |
 | `model_catalog` | Serve the governed EnMaaS model catalog | `filters/src/model_catalog/` | No equivalent in upstream main | Keep ET-only |
-| `content_normalize` | Normalize provider-specific Anthropic content | `filters/src/content_normalize/` | No equivalent in upstream main | ET-only; PriceTag removed it from the shared chain and must scope it before any re-enable |
-| `reasoning_effort_map` | Map unsupported reasoning values for Qwen | `filters/src/reasoning_effort_map/` | No equivalent in upstream main | Keep ET-only; currently Qwen-scoped |
 | `reject_upgrade` | Prevent WebSocket/upgrade traffic bypassing metering | `filters/src/reject_upgrade/` | No equivalent in upstream main | Keep ET-only |
 | `stream_usage_inject` | Request usage on OpenAI Chat streaming | Upstream implementation retained in ET | Upstream PR #1231 merged | Covered; do not carry a duplicate ET port |
 | `model_to_provider` | Preserve public model identity while selecting provider/target model | `filters/src/inference/model_to_provider.rs` | Upstream PR #1372 closed; no current equivalent found | Keep ET-only until a new upstream design lands |
+| `intelligent_route` target-model/provider marker extension | Select hot-reloaded candidates, rewrite provider target IDs, and publish provider markers for dialect/path filters | `filters/src/routing/{intelligent_route,descriptor,overlay}.rs` | Base overlay routing exists upstream; target-model/body-rewrite extension is ET PR #12 | Keep the small ET extension for the EnMaaS target image; propose it upstream after review |
 | Vertex Anthropic dialect | Translate `vertex/*` Anthropic rawPredict requests/responses | `apis/src/vertex/` plus `vertex-anthropic.yaml` | Upstream PR #1358 closed; upstream has Vertex Gemini, not this dialect | Keep ET-only and revalidate on every upstream Vertex change |
 | GCP `key_file` | Mint OAuth tokens from a mounted service-account JSON key | `filters/src/gcp/` | Upstream has the `key_file` config shape, but the current upstream fetch path is still not implemented; PR #1356 closed | Keep ET implementation; do not treat upstream config parsing as runtime parity |
 | GCP cluster scope | Prevent GCP credentials reaching non-GCP providers | `gcp_adc.clusters` | No upstream equivalent in the current tree | Keep ET-only |
@@ -111,7 +110,8 @@ no ET cluster-gating contract.
 4. Keep ET-only filters and their tests in feature-specific commits so a future
    rebase can replay or drop them independently.
 5. Build EnMaaS images only from pushed ET commits with
-   `PRAXIS_AI_FEATURES=full,gcp-adc-filter`; record the source commit and image
+   `PRAXIS_AI_FEATURES=full,gcp-adc-filter` until the lean feature profile is
+   qualified; record the source commit and image
    digest before deployment.
 6. Do not deploy an upstream 0.7.4 bump until the PriceTag embedded configs,
    Vertex paths, metering paths, and provider-specific smoke tests pass.
@@ -166,7 +166,8 @@ active implementation PR without a replacement design.
 
 - API-key validation, tenant identity, model access, and model catalog.
 - PriceTag model-policy preflight and file-backed internal metering auth.
-- Qwen-only content/reasoning compatibility behavior.
+- ~~Qwen-only content/reasoning compatibility behavior~~ — removed after Qwen retirement; the ET implementations were deleted from this fork.
+- Hot-reloaded intelligent-route overlays and provider-specific target-model rewrites.
 - Vertex Anthropic rawPredict translation and public-model preservation.
 - Mounted GCP key-file token minting plus cluster-scoped credential injection.
 - StreamBuffer token-count correction and the EnMaaS 1 MiB scratch setting.
@@ -175,7 +176,7 @@ active implementation PR without a replacement design.
 
 - Rebase ET from Praxis core/AI 0.7.4, resolving filter registry and API drift.
 - Re-run all EnMaaS provider smoke tests: OpenAI, Anthropic, Vertex Anthropic,
-  Vertex Gemini, GLM, hosted Qwen, streaming usage, and failed-request metering.
+  Vertex Gemini, GLM, streaming usage, and failed-request metering.
 - Reconfirm filter order: auth → access policy → model/header routing → metering
   → translation/credential injection → token extraction, with no client
   credential leaking to external providers.
