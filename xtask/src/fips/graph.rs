@@ -167,6 +167,38 @@ enum Tree {
 /// Run `cargo tree` inverted on `crate_name` over normal edges with the given
 /// feature flags, and classify the answer.
 fn inverted_tree(context: &Context, crate_name: &str, feature_flags: &[String]) -> Tree {
+    let tree = run_tree(context, crate_name, feature_flags);
+    if let Tree::Error(error) = &tree {
+        let versions = error
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix(&format!("{crate_name}@")))
+            .map(|version| format!("{crate_name}@{version}"))
+            .collect::<Vec<_>>();
+        if !versions.is_empty() {
+            let mut errors = Vec::new();
+            let mut absent = true;
+            for version in versions {
+                match run_tree(context, &version, feature_flags) {
+                    Tree::Present(tree) => return Tree::Present(tree),
+                    Tree::Absent => {},
+                    Tree::Error(error) => {
+                        absent = false;
+                        errors.push(error);
+                    },
+                }
+            }
+            return if absent {
+                Tree::Absent
+            } else {
+                Tree::Error(errors.join("; "))
+            };
+        }
+    }
+    tree
+}
+
+/// Run one inverted cargo-tree query.
+fn run_tree(context: &Context, crate_name: &str, feature_flags: &[String]) -> Tree {
     let output = Command::new("cargo")
         .current_dir(&context.root)
         .arg("tree")
@@ -192,6 +224,9 @@ fn classify(text: &str) -> Tree {
         return Tree::Absent;
     }
     if let Some(error) = text.lines().find(|line| line.starts_with("error")) {
+        if error.contains("is ambiguous") {
+            return Tree::Error(text.to_owned());
+        }
         return Tree::Error(error.to_owned());
     }
     Tree::Present(text.to_owned())

@@ -6,11 +6,11 @@ and the build source for EnMaaS Praxis images. Runtime configuration, manifests,
 Secret mounts, and credentials remain in
 https://github.com/redhat-et/pricetag.
 
-**Snapshot date:** 2026-10-13
-**ET main:** `0b35bf3ebdff0d5d924f8346c917f42440defc1f` (PR #10)
-**Upstream main:** `eacf145cdb6aabacb57f3441fd6d37a610ca9152`
-**ET base:** Praxis crates 0.7.3; upstream main has moved to 0.7.4
-**Divergence:** 46 ET-only commits and 109 upstream-only commits at this snapshot
+**Snapshot date:** 2026-10-14
+**ET main:** `99353a6bf8ef0fc378bc637f9fd66d78c65f1895` (PR #11)
+**Upstream main:** `d5b05be0fb59c1973c21e0b7a9ed779462fb0321` (0.7.4)
+**ET base:** Praxis crates 0.7.3; ET is not yet rebased onto upstream 0.7.4
+**Divergence:** 47 ET-only commits and 175 upstream-only commits at this snapshot
 
 This is a point-in-time compatibility inventory, not a claim that ET `main` is
 fully rebased onto the latest upstream. Re-run the comparison after every
@@ -28,7 +28,7 @@ the ET-only filters and ported the reviewed behavior for:
 
 - API-key authentication and tenant identity metadata
 - group/model access policy and model catalog
-- content normalization and reasoning-effort mapping
+- API compatibility filters that were later retired from the EnMaaS target
 - upgrade rejection on unmetered connection upgrades
 - GCP cluster-scoped credentials and Vertex Anthropic routing
 - model-to-provider routing and PriceTag metering integration
@@ -59,19 +59,21 @@ configuration, not this source repository alone.
 | Capability | EnMaaS use | ET implementation | Current upstream status | Decision |
 |---|---|---|---|---|
 | `api_key_auth` | Validate MaaS API keys and publish tenant identity | `filters/src/api_key_auth/` | No equivalent in upstream main | Keep ET-only |
-| `model_access` | Enforce group/model access policy | `filters/src/model_access/` | No equivalent in upstream main | Keep ET-only |
-| `model_catalog` | Serve the governed EnMaaS model catalog | `filters/src/model_catalog/` | No equivalent in upstream main | Keep ET-only |
-| `content_normalize` | Normalize provider-specific Anthropic content | `filters/src/content_normalize/` | No equivalent in upstream main | ET-only; PriceTag removed it from the shared chain and must scope it before any re-enable |
-| `reasoning_effort_map` | Map unsupported reasoning values for Qwen | `filters/src/reasoning_effort_map/` | No equivalent in upstream main | Keep ET-only; currently Qwen-scoped |
+| `model_access` (follow-up removal) | Enforce group/model access policy | `filters/src/model_access/` | No equivalent in upstream main | **Retained in PR #12 for backward-compatible blue/green rollout.** Group filtering is inert with a single `ge` tenant group, and per-model policy is owned by metering. Remove only in the follow-up cleanup PR after every profile/config/shadow has migrated and the green image is validated. |
+| `content_normalize` (follow-up removal) | Legacy provider content normalization | `filters/src/content_normalize/` | No equivalent in upstream main | **Retained in PR #12 for live EnMaaS/shadow config compatibility.** Qwen is retired; remove only in the post-migration cleanup PR. |
+| `reasoning_effort_map` (follow-up removal) | Legacy Qwen reasoning compatibility | `filters/src/reasoning_effort_map/` | No equivalent in upstream main | **Retained in PR #12 for config compatibility.** Qwen is retired; remove only in the post-migration cleanup PR. |
+| `model_catalog` (overlay-driven) | Serve the governed `/v1/models` catalog as a **projection of the routing overlay** (single source of truth with routing) | `filters/src/model_catalog/` + overlay-source mode | No equivalent in upstream main | Keep ET-only. Discovery membership comes from each overlay candidate's `catalog` field (`openai`/`anthropic`), not a separate hand list, so `/v1/models` cannot drift from what routes. Static `models:` mode retained for back-compat until all profiles are overlay-driven. |
 | `reject_upgrade` | Prevent WebSocket/upgrade traffic bypassing metering | `filters/src/reject_upgrade/` | No equivalent in upstream main | Keep ET-only |
 | `stream_usage_inject` | Request usage on OpenAI Chat streaming | Upstream implementation retained in ET | Upstream PR #1231 merged | Covered; do not carry a duplicate ET port |
-| `model_to_provider` | Preserve public model identity while selecting provider/target model | `filters/src/inference/model_to_provider.rs` | Upstream PR #1372 closed; no current equivalent found | Keep ET-only until a new upstream design lands |
+| `model_to_provider` (retire after EnMaaS overlay migration) | Preserve public model identity while selecting provider/target model | `filters/src/inference/model_to_provider.rs` | Upstream PR #1372 closed; superseded downstream by the `intelligent_route` target-model extension | **Decision: retire** once both dogfood and EnMaaS route via `intelligent_route` + overlay and no rendered profile references `filter: model_to_provider`. Remove the filter, its tests/docs, and the EnMaaS `vertex-fragments/*model-to-provider.yaml` in the same change. |
+| `intelligent_route` target-model/catalog extension | Select hot-reloaded candidates, rewrite provider target IDs, publish provider markers for dialect/path filters, and carry discovery metadata (`catalog`/`display_name`/`owned_by`) so one overlay is the single source for both routing and `/v1/models` | `filters/src/routing/{intelligent_route,descriptor,overlay}.rs` + `filters/src/model_catalog/` overlay mode | Base overlay routing exists upstream; target-model/body-rewrite + overlay-catalog extension is ET PR #12 | Keep the ET extension for the EnMaaS target image; propose upstream after review |
 | Vertex Anthropic dialect | Translate `vertex/*` Anthropic rawPredict requests/responses | `apis/src/vertex/` plus `vertex-anthropic.yaml` | Upstream PR #1358 closed; upstream has Vertex Gemini, not this dialect | Keep ET-only and revalidate on every upstream Vertex change |
 | GCP `key_file` | Mint OAuth tokens from a mounted service-account JSON key | `filters/src/gcp/` | Upstream has the `key_file` config shape, but the current upstream fetch path is still not implemented; PR #1356 closed | Keep ET implementation; do not treat upstream config parsing as runtime parity |
 | GCP cluster scope | Prevent GCP credentials reaching non-GCP providers | `gcp_adc.clusters` | No upstream equivalent in the current tree | Keep ET-only |
 | StreamBuffer token-count correction | Avoid double-feeding the EOS buffer and recording zero usage | ET token-count history | Upstream PR #1360 closed; upstream has related token-count changes but not verified equivalent | Keep the ET behavior until an explicit code/test comparison proves parity |
 | File-backed internal metering auth | Authenticate private entitlement/event callouts | ET metering changes plus PriceTag Secret mount | No upstream equivalent | Keep ET-only; paired with PriceTag metering auth |
-| Model-policy preflight | Send resolved model to PriceTag and map policy denial to 403 | ET metering changes, merged ET PR #3 | No upstream equivalent | Keep ET-only and deploy only with the matching PriceTag API |
+| Model-policy preflight | Send resolved model to PriceTag and map policy denial to 403; the planned sole model-authorization gate after `model_access` removal | ET metering changes (merged ET PR #3) plus the new `external_metering.model_policy_fail_open` flag | No upstream equivalent | Keep ET-only and deploy only with the matching PriceTag API. Configure `model_policy_check: true` + `model_policy_fail_open: false` on the inference chains so the policy decision fails closed without coupling billing availability to it. |
+| `external_metering` scoped policy fail mode | Fail the model-policy decision closed on metering outage without failing the whole callout closed | `external_metering.model_policy_fail_open` (default `true`) | No upstream equivalent | Keep ET-only; propose upstream. **Interim gap:** if the PriceTag metering policy capability is disabled or does not return `model_allowed`, there is no strong per-model gate after `model_access` removal — close this when the metering capability lands. |
 
 ### Shared upstream capabilities already present in ET
 
@@ -111,7 +113,8 @@ no ET cluster-gating contract.
 4. Keep ET-only filters and their tests in feature-specific commits so a future
    rebase can replay or drop them independently.
 5. Build EnMaaS images only from pushed ET commits with
-   `PRAXIS_AI_FEATURES=full,gcp-adc-filter`; record the source commit and image
+   `PRAXIS_AI_FEATURES=full,gcp-adc-filter` until the lean feature profile is
+   qualified; record the source commit and image
    digest before deployment.
 6. Do not deploy an upstream 0.7.4 bump until the PriceTag embedded configs,
    Vertex paths, metering paths, and provider-specific smoke tests pass.
@@ -164,9 +167,10 @@ active implementation PR without a replacement design.
 
 ### Must retain or revalidate in ET
 
-- API-key validation, tenant identity, model access, and model catalog.
+- API-key validation, tenant identity, and model catalog. (Model access is no longer a dedicated filter: per-model authorization is owned by the metering model-policy preflight with a fail-closed policy decision.)
 - PriceTag model-policy preflight and file-backed internal metering auth.
-- Qwen-only content/reasoning compatibility behavior.
+- Qwen-only content/reasoning compatibility behavior is retained temporarily for old running configs and explicitly scheduled for the post-migration cleanup PR.
+- Hot-reloaded intelligent-route overlays and provider-specific target-model rewrites.
 - Vertex Anthropic rawPredict translation and public-model preservation.
 - Mounted GCP key-file token minting plus cluster-scoped credential injection.
 - StreamBuffer token-count correction and the EnMaaS 1 MiB scratch setting.
@@ -175,7 +179,7 @@ active implementation PR without a replacement design.
 
 - Rebase ET from Praxis core/AI 0.7.4, resolving filter registry and API drift.
 - Re-run all EnMaaS provider smoke tests: OpenAI, Anthropic, Vertex Anthropic,
-  Vertex Gemini, GLM, hosted Qwen, streaming usage, and failed-request metering.
+  Vertex Gemini, GLM, streaming usage, and failed-request metering.
 - Reconfirm filter order: auth → access policy → model/header routing → metering
   → translation/credential injection → token extraction, with no client
   credential leaking to external providers.

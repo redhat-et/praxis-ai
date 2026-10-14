@@ -146,7 +146,10 @@ async fn valid_response_without_username_is_rejected() {
     let mut ctx = make_filter_context(&req);
 
     let action = filter.on_request(&mut ctx).await.unwrap();
-    assert!(matches!(action, FilterAction::Reject(_)), "empty identity must fail closed");
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "empty identity must fail closed"
+    );
 }
 
 #[tokio::test]

@@ -229,15 +229,15 @@ fn register_general_ai_filters(registry: &mut FilterRegistry) {
     );
     praxis_filter::register_filters!(
         @register registry,
+        http "model_catalog" => ModelCatalogFilter::from_config
+    );
+    praxis_filter::register_filters!(
+        @register registry,
         http "content_normalize" => ContentNormalizeFilter::from_config
     );
     praxis_filter::register_filters!(
         @register registry,
         http "model_access" => ModelAccessFilter::from_config
-    );
-    praxis_filter::register_filters!(
-        @register registry,
-        http "model_catalog" => ModelCatalogFilter::from_config
     );
     praxis_filter::register_filters!(
         @register registry,

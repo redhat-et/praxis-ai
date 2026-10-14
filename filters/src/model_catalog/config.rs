@@ -3,6 +3,8 @@
 
 //! Configuration types for the model catalog filter.
 
+use std::path::PathBuf;
+
 use serde::Deserialize;
 
 // -----------------------------------------------------------------------------
@@ -32,8 +34,15 @@ pub(super) struct ModelCatalogConfig {
     #[serde(default = "default_path")]
     pub path: String,
 
-    /// Advertised models, in declaration order.
-    pub models: Vec<ModelEntry>,
+    /// Advertised models, in declaration order. Mutually exclusive with
+    /// `overlay_file`.
+    #[serde(default)]
+    pub models: Option<Vec<ModelEntry>>,
+
+    /// Routing overlay whose candidates provide catalog membership and
+    /// metadata. Mutually exclusive with `models`.
+    #[serde(default)]
+    pub overlay_file: Option<PathBuf>,
 }
 
 /// A single advertised model.
@@ -83,16 +92,21 @@ fn default_owned_by() -> String {
 
 /// Validate config beyond what deserialization guarantees.
 pub(super) fn validate_config(cfg: &ModelCatalogConfig) -> Result<(), String> {
-    if cfg.models.is_empty() {
-        return Err("models must not be empty".to_owned());
+    if cfg.models.is_some() == cfg.overlay_file.is_some() {
+        return Err("exactly one of models or overlay_file must be configured".to_owned());
+    }
+    if let Some(models) = &cfg.models {
+        if models.is_empty() {
+            return Err("models must not be empty".to_owned());
+        }
+        for (i, m) in models.iter().enumerate() {
+            if m.id.is_empty() {
+                return Err(format!("models[{i}]: id must not be empty"));
+            }
+        }
     }
     if !cfg.path.starts_with('/') {
         return Err(format!("path must start with '/', got '{}'", cfg.path));
-    }
-    for (i, m) in cfg.models.iter().enumerate() {
-        if m.id.is_empty() {
-            return Err(format!("models[{i}]: id must not be empty"));
-        }
     }
     Ok(())
 }

@@ -12,10 +12,7 @@ fn make_filter() -> Box<dyn HttpFilter> {
 }
 
 fn make_scoped_filter() -> Box<dyn HttpFilter> {
-    let config: serde_yaml::Value = serde_yaml::from_str(
-        "models:\n  - Inferact/Qwen3.8-Flash-Next-NVFP4\n",
-    )
-    .unwrap();
+    let config: serde_yaml::Value = serde_yaml::from_str("models:\n  - Inferact/Qwen3.8-Flash-Next-NVFP4\n").unwrap();
     ContentNormalizeFilter::from_config(&config).unwrap()
 }
 

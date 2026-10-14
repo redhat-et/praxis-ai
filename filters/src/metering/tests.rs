@@ -43,11 +43,33 @@ source: "my-gateway"
 fail_open: false
 identity_header_prefix: "x-custom-"
 model_policy_check: true
+model_policy_fail_open: false
 "#,
     )
     .unwrap();
     let filter = ExternalMeteringFilter::from_config(&yaml).unwrap();
     assert_eq!(filter.name(), "external_metering");
+}
+
+#[test]
+fn model_policy_fail_closed_requires_model_policy_check() {
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str("metering_url: http://metering:8080\nmodel_policy_fail_open: false\n").unwrap();
+    let error = build_filter(&yaml)
+        .err()
+        .expect("fail-closed policy requires policy checking");
+    assert!(error.to_string().contains("model_policy_check"));
+}
+
+#[tokio::test]
+async fn unavailable_model_policy_can_fail_closed_independently() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "metering_url: http://127.0.0.1:1\nallow_private_endpoint: true\nmodel_policy_check: true\nmodel_policy_fail_open: false\n",
+    )
+    .unwrap();
+    let filter = build_filter(&yaml).unwrap();
+    let action = filter.check_balance(&state_for("alice", "gpt-4")).await;
+    assert!(matches!(action, FilterAction::Reject(rejection) if rejection.status == 403));
 }
 
 #[test]
