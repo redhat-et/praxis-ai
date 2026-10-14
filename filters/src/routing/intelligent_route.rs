@@ -125,7 +125,7 @@ struct IntelligentRouteConfig {
 
     /// Resolve inference model routing from the request body during the body
     /// phase. This prevents a client-supplied model header from selecting a
-    /// backend before model_to_header has inspected the body.
+    /// backend before `model_to_header` has inspected the body.
     #[serde(default)]
     body_authoritative: bool,
 
@@ -473,6 +473,7 @@ pub struct IntelligentRouteFilter {
     provider_hop_clusters: BTreeSet<String>,
     /// Header that carries the model name.
     model_header: HeaderName,
+    /// Resolve inference routes from the buffered body instead of a client header.
     body_authoritative: bool,
     /// Management/discovery path prefixes that bypass model resolution.
     skip_paths: Vec<Arc<str>>,
@@ -849,6 +850,7 @@ fn validate_session_affinity_config(cfg: &SessionAffinityConfig) -> Result<(), F
     Ok(())
 }
 
+#[expect(clippy::too_many_lines, reason = "ordered request-phase routing guards")]
 #[async_trait]
 impl HttpFilter for IntelligentRouteFilter {
     fn name(&self) -> &'static str {
@@ -962,7 +964,7 @@ impl HttpFilter for IntelligentRouteFilter {
 ///
 /// `model_to_header` promotes the value by queuing an outbound header update;
 /// that update is intentionally not visible in `ctx.request.headers` during
-/// the same body pass. Reading the body here lets intelligent_route select the
+/// the same body pass. Reading the body here lets `intelligent_route` select the
 /// candidate before forwarding without trusting a client-supplied header.
 fn extract_body_model_lookup(body: &Option<Bytes>) -> Lookup {
     let Some(raw) = body.as_ref() else {
@@ -1277,16 +1279,15 @@ fn record_route_decision(ctx: &mut HttpFilterContext<'_>, local_site: &Arc<str>,
         if let Some(paths) = &candidate.paths {
             ctx.set_metadata(
                 ROUTE_TARGET_PATHS,
-                paths.iter().map(|path| path.as_ref()).collect::<Vec<_>>().join(","),
+                paths.iter().map(AsRef::as_ref).collect::<Vec<_>>().join(","),
             );
         }
     }
-    if candidate.kind == CapabilityKind::InferenceModel {
-        if let Some(provider) = &candidate.provider
-            && let Ok(provider) = HeaderValue::from_str(provider.as_ref())
-        {
-            ctx.request_headers_to_set.push((PROVIDER_HEADER.clone(), provider));
-        }
+    if candidate.kind == CapabilityKind::InferenceModel
+        && let Some(provider) = &candidate.provider
+        && let Ok(provider) = HeaderValue::from_str(provider.as_ref())
+    {
+        ctx.request_headers_to_set.push((PROVIDER_HEADER.clone(), provider));
     }
     if let Some(rank) = candidate.rank {
         ctx.set_metadata(ROUTE_RANK, rank.to_string());

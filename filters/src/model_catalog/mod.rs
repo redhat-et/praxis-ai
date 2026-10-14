@@ -189,18 +189,24 @@ impl ModelCatalogFilter {
 /// forward-compatible with the routing overlay contract.
 #[derive(Debug, Deserialize)]
 struct OverlayCandidate {
+    /// Canonical model identifier.
     name: String,
     #[serde(default)]
+    /// Catalog dialects in which this model is exposed.
     catalog: Option<Vec<String>>,
     #[serde(default)]
+    /// Optional display label.
     display_name: Option<String>,
     #[serde(default)]
+    /// Optional model owner label.
     owned_by: Option<String>,
     #[serde(default)]
+    /// Optional creation timestamp.
     created: Option<i64>,
 }
 
 /// Load an overlay-backed catalog from either legacy or envelope JSON.
+#[expect(clippy::too_many_lines, reason = "linear overlay parsing and projection")]
 fn load_overlay_catalog(path: &Path, format: CatalogFormat) -> Result<Vec<CatalogModel>, FilterError> {
     let content = fs::read_to_string(path)
         .map_err(|error| FilterError::from(format!("model_catalog: failed to read {}: {error}", path.display())))?;
@@ -236,16 +242,19 @@ fn load_overlay_catalog(path: &Path, format: CatalogFormat) -> Result<Vec<Catalo
         .collect())
 }
 
-/// Small polling watcher suitable for a projected ConfigMap file. Polling is
-/// deliberate: it follows ConfigMap symlink replacement without requiring a
+/// Small polling watcher suitable for a projected `ConfigMap` file. Polling is
+/// deliberate: it follows `ConfigMap` symlink replacement without requiring a
 /// `subPath` mount and keeps the catalog watcher independent from routing's
 /// private watcher implementation.
 struct CatalogReloadHandle {
+    /// Stop flag observed by the watcher thread.
     stop: Arc<AtomicBool>,
+    /// Join handle for the watcher thread.
     thread: Option<thread::JoinHandle<()>>,
 }
 
 impl CatalogReloadHandle {
+    /// Start watching the projected overlay file.
     fn spawn(
         path: PathBuf,
         format: CatalogFormat,
@@ -260,6 +269,7 @@ impl CatalogReloadHandle {
             .spawn(move || {
                 let mut previous = initial;
                 while !thread_stop.load(Ordering::Relaxed) {
+                    #[expect(clippy::disallowed_methods, reason = "dedicated polling watcher thread")]
                     thread::sleep(Duration::from_millis(500));
                     let Ok(current) = fs::read(&path) else { continue };
                     if current == previous { continue }

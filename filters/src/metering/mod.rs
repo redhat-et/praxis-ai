@@ -153,6 +153,7 @@ const STATUS_METERING_UNAVAILABLE: u16 = 503;
 /// model_policy_check: false
 /// model_policy_fail_open: true
 /// ```
+#[expect(clippy::struct_excessive_bools, reason = "independent fail-open and policy controls")]
 pub struct ExternalMeteringFilter {
     /// Connect-time policy for the metering endpoint. Rejects non-public
     /// addresses unless the operator sets `allow_private_endpoint`.

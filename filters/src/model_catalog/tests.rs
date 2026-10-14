@@ -195,7 +195,7 @@ async fn overlay_catalog_projects_only_matching_dialect() {
         ]}"#,
     )
     .unwrap();
-    let filter = make_filter(&format!("format: openai\noverlay_file: {:?}\n", path));
+    let filter = make_filter(&format!("format: openai\noverlay_file: {path:?}\n"));
     let body = terminal_body(run(&*filter, Method::GET, "/v1/models").await);
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(ids(&value), vec!["chat-model", "both-model"]);
