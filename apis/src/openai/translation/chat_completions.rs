@@ -37,6 +37,8 @@ const DEFAULT_TEXT_FORMAT: &str = "text";
 
 /// Maximum query length accepted by the synthesized web-search function.
 const WEB_SEARCH_QUERY_MAX_LENGTH: usize = 4_096;
+/// Maximum queries accepted in one synthesized web-search call.
+const WEB_SEARCH_MAX_QUERIES: usize = 64;
 
 /// Maximum query length advertised by the synthesized file-search function.
 ///
@@ -1298,13 +1300,18 @@ fn synthesized_web_search_tool() -> Value {
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": WEB_SEARCH_QUERY_MAX_LENGTH
+                    "queries": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": WEB_SEARCH_QUERY_MAX_LENGTH
+                        },
+                        "minItems": 1,
+                        "maxItems": WEB_SEARCH_MAX_QUERIES
                     }
                 },
-                "required": ["query"],
+                "required": ["queries"],
                 "additionalProperties": false
             },
             "strict": true
@@ -1515,7 +1522,7 @@ pub(crate) fn chat_response_to_response_resource(
     let incomplete_details = incomplete_details(finish_reason);
     let output = build_output_items(obj, context, status)?;
     let usage = build_usage(obj);
-    let service_tier = service_tier_value_with_context(obj, context);
+    let service_tier = service_tier_value_with_context(obj.get("service_tier"), context);
     let parts = ResponseResourceParts {
         status,
         incomplete_details: &incomplete_details,
@@ -1528,6 +1535,11 @@ pub(crate) fn chat_response_to_response_resource(
 }
 
 /// Validate the minimum successful Chat Completions shape used by translation.
+///
+/// A Responses resource represents a single assistant turn and has no faithful
+/// representation for independent Chat alternatives, so exactly one choice is
+/// required: translating only the first of several would silently discard the
+/// rest. The streaming converter enforces the same single-choice contract.
 fn validate_chat_response<'a>(
     obj: &'a Map<String, Value>,
     reasoning_options: &ReasoningOptions,
@@ -1536,6 +1548,11 @@ fn validate_chat_response<'a>(
         .get("choices")
         .and_then(Value::as_array)
         .ok_or(TranslationError::InvalidChatResponse("choices must be an array"))?;
+    if choices.len() > 1 {
+        return Err(TranslationError::InvalidChatResponse(
+            "choices must contain exactly one choice",
+        ));
+    }
     let choice = choices
         .first()
         .and_then(Value::as_object)
@@ -1683,11 +1700,15 @@ fn is_supported_function_call(tool_call: &Value) -> bool {
 /// output list, null usage, and `in_progress` status, matching the snapshot
 /// carried by `response.created` and `response.in_progress` streaming events.
 pub(crate) fn in_progress_response_resource(context: &ResponseContext<'_>) -> Result<Value, TranslationError> {
-    let service_tier = context
-        .service_tier
-        .filter(|value| value.is_string())
-        .cloned()
-        .unwrap_or_else(|| Value::String(DEFAULT_SERVICE_TIER.to_owned()));
+    in_progress_response_resource_with_service_tier(context, context.service_tier)
+}
+
+/// Build an `in_progress` snapshot with a provider-observed service tier.
+pub(crate) fn in_progress_response_resource_with_service_tier(
+    context: &ResponseContext<'_>,
+    service_tier: Option<&Value>,
+) -> Result<Value, TranslationError> {
+    let service_tier = service_tier_value_with_context(service_tier, context);
     let parts = ResponseResourceParts {
         status: "in_progress",
         incomplete_details: &Value::Null,
@@ -1782,7 +1803,10 @@ fn insert_request_resource_fields(resource: &mut Value, context: &ResponseContex
     }
 }
 
-/// Extract the first Chat Completions choice.
+/// Extract the single Chat Completions choice.
+///
+/// Response validation rejects any cardinality other than one before output
+/// construction runs, so the first choice is the validated only choice.
 fn first_choice(obj: &Map<String, Value>) -> Option<&Value> {
     obj.get("choices")
         .and_then(Value::as_array)
@@ -1920,8 +1944,8 @@ fn normalize_response_tools(tools: &[Value]) -> Vec<Value> {
 }
 
 /// Build provider service tier, falling back to the request context when absent.
-fn service_tier_value_with_context(obj: &Map<String, Value>, context: &ResponseContext<'_>) -> Value {
-    obj.get("service_tier")
+fn service_tier_value_with_context(service_tier: Option<&Value>, context: &ResponseContext<'_>) -> Value {
+    service_tier
         .filter(|value| value.is_string())
         .or_else(|| context.service_tier.filter(|value| value.is_string()))
         .cloned()
@@ -1941,7 +1965,10 @@ fn number_value(value: f64) -> Value {
     Number::from_f64(value).map_or(Value::Null, Value::Number)
 }
 
-/// Build all `Responses` output items from the first Chat choice.
+/// Build all `Responses` output items from the single Chat choice.
+///
+/// The caller has already validated that the response carries exactly one
+/// choice, so the first choice is the only choice.
 fn build_output_items(
     obj: &Map<String, Value>,
     context: &ResponseContext<'_>,
@@ -2129,7 +2156,7 @@ pub(crate) fn web_search_call_output_item_from_parts(
     if call_id.is_empty() {
         return Err(TranslationError::InvalidWebSearchCall("missing call id"));
     }
-    let query = web_search_query(arguments)?;
+    let action = web_search_action(arguments)?;
     // The response can be incomplete because generation hit a token or content
     // filter limit, but WebSearchToolCall has no `incomplete` item status.
     // Preserve the response-level status and represent the interrupted hosted
@@ -2140,10 +2167,7 @@ pub(crate) fn web_search_call_output_item_from_parts(
         "id": call_id,
         "type": "web_search_call",
         "status": status,
-        "action": {
-            "type": "search",
-            "query": query
-        }
+        "action": action
     }))
 }
 
@@ -2159,25 +2183,58 @@ fn web_search_call_id(tool_call: &Value) -> Result<&str, TranslationError> {
 /// Strict arguments accepted from the private web-search function.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WebSearchFunctionArguments {
-    /// Query to pass to the hosted search executor.
+struct WebSearchQueriesFunctionArguments {
+    /// Queries to pass to the hosted search executor.
+    queries: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+/// Deprecated singular arguments retained for existing Chat backends.
+struct WebSearchQueryFunctionArguments {
+    /// Deprecated query form retained for existing Chat backends.
     query: String,
 }
 
-/// Parse and bound the query emitted by a Chat Completions model.
-fn web_search_query(arguments: &str) -> Result<String, TranslationError> {
+#[derive(Deserialize)]
+#[serde(untagged)]
+/// Arguments accepted from the private web-search function.
+enum WebSearchFunctionArguments {
+    /// Current multi-query form.
+    Queries(WebSearchQueriesFunctionArguments),
+    /// Deprecated single-query form.
+    Query(WebSearchQueryFunctionArguments),
+}
+
+/// Parse and bound the action emitted by a Chat Completions model.
+fn web_search_action(arguments: &str) -> Result<Value, TranslationError> {
     let parsed: WebSearchFunctionArguments = serde_json::from_str(arguments).map_err(|_error| {
-        TranslationError::InvalidWebSearchCall("arguments must contain only a string-valued query")
+        TranslationError::InvalidWebSearchCall("arguments must contain a string-valued query or queries array")
     })?;
-    if parsed.query.is_empty() {
+
+    let queries = match parsed {
+        WebSearchFunctionArguments::Queries(args) => args.queries,
+        WebSearchFunctionArguments::Query(args) => vec![args.query],
+    };
+
+    if queries.is_empty() {
         return Err(TranslationError::InvalidWebSearchCall(
-            "query must be a non-empty string",
+            "queries must contain at least one non-empty string",
         ));
     }
-    if parsed.query.chars().count() > WEB_SEARCH_QUERY_MAX_LENGTH {
-        return Err(TranslationError::InvalidWebSearchCall("query exceeds maximum length"));
+    if queries.len() > WEB_SEARCH_MAX_QUERIES {
+        return Err(TranslationError::InvalidWebSearchCall("queries exceed maximum count"));
     }
-    Ok(parsed.query)
+    if queries
+        .iter()
+        .any(|query| query.is_empty() || query.chars().count() > WEB_SEARCH_QUERY_MAX_LENGTH)
+    {
+        return Err(TranslationError::InvalidWebSearchCall(
+            "each query must be a non-empty string within the maximum length",
+        ));
+    }
+
+    Ok(json!({"type": "search", "queries": queries}))
 }
 
 /// Build one `Responses` function call item from a Chat Completions tool call.

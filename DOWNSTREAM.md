@@ -23,7 +23,7 @@ Purple nodes in the diagram identify custom ET filters or ET-specific filter
 extensions; the remaining nodes represent upstream Praxis/core components,
 provider services, or deployment infrastructure.
 
-## Six remaining EnMaaS capabilities
+## Five remaining EnMaaS capabilities
 
 | Capability | EnMaaS behavior | ET implementation | Upstream tracking | Long-term question |
 |---|---|---|---|---|
@@ -31,12 +31,11 @@ provider services, or deployment infrastructure.
 | `model_catalog` | Serves credential/dialect-specific `/v1/models` responses from the authoritative routing catalog | `filters/src/model_catalog/` | [Issue #1067](https://github.com/praxis-proxy/ai/issues/1067) | Can upstream own a provider-neutral catalog projection with principal/dialect filtering and reloadable configuration? |
 | `reject_upgrade` | Rejects connection upgrades that would bypass body-based authorization, metering, and token accounting | `filters/src/reject_upgrade/` | [Issue #1359](https://github.com/praxis-proxy/ai/issues/1359) | Should Praxis provide a standard policy for rejecting or safely handling upgrades before body-dependent filters? |
 | `token_count` provider `auto` | Selects the correct usage parser for mixed OpenAI/Anthropic traffic on shared listeners | `filters/src/token_usage/count.rs` | [Issue #1720](https://github.com/praxis-proxy/ai/issues/1720) | Can upstream expose a documented automatic dialect/parser mode with bounded, fail-safe behavior? |
-| File-backed internal metering auth | Reads a Secret-mounted bearer token for private Metering calls and supports rotation without rebuilding the image | `filters/src/metering/` | [Issue #1721](https://github.com/praxis-proxy/ai/issues/1721) | Can the external metering filter support a safe file credential source and rotation semantics? |
 | Metering model-policy preflight | Sends the resolved model and tenant to the Metering policy API before provider forwarding; denial becomes HTTP 403 | `filters/src/metering/` | [Issue #1719](https://github.com/praxis-proxy/ai/issues/1719) | Can upstream support an optional authorization preflight distinct from ordinary usage-accounting fail-open behavior? |
 
 ## Questions for the Praxis team
 
-For each of the six issues above, please confirm:
+For each of the five issues above, please confirm:
 
 1. Is the capability appropriate for upstream Praxis, or should it remain an
    ET/platform integration?
@@ -51,3 +50,10 @@ For each of the six issues above, please confirm:
 The ET `main` branch is synchronized with upstream through the normal downstream
 workflow. Resolve sync conflicts in ET, run the required checks, and record the
 resulting sync commit here before building an EnMaaS image.
+
+The v0.8.0 sync moves GCP service-account credentials and `model_to_provider`
+to upstream implementations. File-backed metering authentication now uses the
+upstream `CredentialSource` core; `internal_auth_file` remains as a
+compatibility alias for deployed configuration. The downstream `vertex`
+Messages→rawPredict filter remains until the upstream
+`anthropic_messages_to_vertexai_anthropic` filter passes an EnMaaS stage A/B.

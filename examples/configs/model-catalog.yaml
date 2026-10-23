@@ -14,7 +14,8 @@
 #
 # This filter handles discovery only: it advertises what the gateway
 # exposes. Authorization -- deciding who may call a model -- stays with
-# the model_access filter; the catalog does not re-declare access rules.
+# the metering model-policy preflight and the routing overlay; the catalog
+# does not re-declare access rules.
 #
 # Requests other than GET /v1/models pass through untouched.
 

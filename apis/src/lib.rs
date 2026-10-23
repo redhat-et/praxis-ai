@@ -2,6 +2,10 @@
 // Copyright (c) 2026 Praxis Contributors
 
 #![allow(unreachable_pub, reason = "migration: visibility will be tightened")]
+// The praxis 0.7.5 subrequest connector type graph is deep enough that
+// auto-trait (`Send`/`Sync`) resolution for subrequest-driven filter futures
+// exceeds the default recursion limit.
+#![recursion_limit = "256"]
 
 //! AI provider API types and persistence for Praxis.
 //!
@@ -18,7 +22,10 @@ mod callout_identity;
 pub mod callout_policy;
 pub mod callout_target;
 pub mod classifier;
+pub mod credential_source;
 pub mod hash;
+#[cfg(all(test, feature = "openai-responses"))]
+mod history_allocation_tests;
 pub mod http_hop;
 pub mod json_body;
 #[cfg(feature = "openai-mcp-tools")]
@@ -42,8 +49,7 @@ pub(crate) mod web_search;
 /// Client-supplied `x-praxis-*` headers are rejected at the protocol boundary.
 pub const MODEL_PROVIDER_HEADER: &str = "x-praxis-ai-provider";
 
-/// Request metadata carrying the model ID sent by the client through a
-/// provider-specific target-model rewrite.
+/// Request metadata carrying the client model ID across a provider target rewrite.
 pub const MODEL_PROVIDER_CLIENT_MODEL_METADATA: &str = "model_to_provider.client_model";
 
 pub use callout_credentials::{CalloutCredentials, CalloutCredentialsFilter};
@@ -125,6 +131,7 @@ pub(crate) mod test_utils {
             cluster: None,
             current_filter_id: None,
             downstream_tls: false,
+            hedge_policy: None,
             extensions: RequestExtensions::default(),
             executed_filter_indices: Vec::new(),
             executed_branch_filters: Vec::new(),

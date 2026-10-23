@@ -20,6 +20,8 @@ see the [Praxis core filter reference][core-ref].
 | [`anthropic_messages_to_chat_completions`](anthropic_messages_to_chat_completions.md) | Transforms Anthropic Messages API requests to Chat Completions-compatible request bodies and transforms compatible responses back. The name refers to the Chat Completions wire shape, not the OpenAI Responses API; any Chat Completions-compatible backend is a valid target, not only OpenAI. |
 | [`anthropic_messages_to_chat_completions_stream`](anthropic_messages_to_chat_completions_stream.md) | Transforms streaming SSE responses between the Chat Completions and Anthropic Messages formats, processing each chunk as it arrives. |
 | [`anthropic_web_search`](anthropic_web_search.md) | Executes server-owned `WebSearch` tool calls in an Anthropic Messages loop. |
+| [`openai_chat_completions_to_anthropic`](openai_chat_completions_to_anthropic.md) | Translates OpenAI Chat Completions requests only when the selected `ExternalModel` candidate uses Anthropic Messages; OpenAI candidates pass through with their configured path and model. |
+| [`openai_chat_completions_to_anthropic_stream`](openai_chat_completions_to_anthropic_stream.md) | Converts the selected Anthropic provider's event stream incrementally. OpenAI-compatible candidates are left byte-for-byte unchanged. |
 
 ### Azure
 
@@ -32,7 +34,6 @@ see the [Praxis core filter reference][core-ref].
 | Filter | Description |
 |--------|-------------|
 | [`callout_credentials`](callout_credentials.md) | Establishing filter that captures typed per-user callout secrets from ingress headers. |
-| [`content_normalize`](content_normalize.md) | Legacy provider content normalization retained for backward-compatible deployed profiles. |
 | [`project_state_owner_headers`](project_state_owner_headers.md) | Projects a normalized [`StateOwner`] into destination-specific HTTP headers. |
 | [`state_owner`](state_owner.md) | Establishes a normalized [`StateOwner`] from trusted identity sources. |
 
@@ -70,6 +71,7 @@ see the [Praxis core filter reference][core-ref].
 
 | Filter | Description |
 |--------|-------------|
+| [`anthropic_messages_to_vertexai_anthropic`](anthropic_messages_to_vertexai_anthropic.md) | Translates Anthropic Messages requests to Vertex AI `rawPredict` and Vertex responses back to the Anthropic dialect. |
 | [`openai_chat_completions_to_vertexai_gemini`](openai_chat_completions_to_vertexai_gemini.md) | Transforms OpenAI Chat Completions requests into Vertex AI Gemini `generateContent` format and translates responses back. |
 | [`vertex`](vertex.md) | Translates Anthropic Messages requests to Vertex AI `rawPredict` and Vertex responses back to the Anthropic dialect. |
 
@@ -106,11 +108,6 @@ see the [Praxis core filter reference][core-ref].
 |--------|-------------|
 | [`http_callout`](http_callout.md) | Calls an external HTTP service during request processing and feeds its response into branch-chain evaluation. |
 
-### Content Normalize
-
-| Filter | Description |
-|--------|-------------|
-
 ### GCP
 
 | Filter | Description |
@@ -135,7 +132,13 @@ see the [Praxis core filter reference][core-ref].
 |--------|-------------|
 | [`llmisvc_model_provider_resolver`](llmisvc_model_provider_resolver.md) | Rewrites publisher-ID body `model` values to the short model name for `LLMISvc` / `KServe` routing; the routing header is left unchanged. |
 | [`model_to_header`](model_to_header.md) | Promotes the JSON `"model"` field from the request body to a request header. |
-| [`model_to_provider`](model_to_provider.md) | Maps stable client-facing model IDs to an internal provider selector and provider-specific target model. |
+| [`model_to_provider`](model_to_provider.md) | Maps stable client-facing model IDs to existing upstream clusters and provider-specific target models. |
+
+### Inflight
+
+| Filter | Description |
+|--------|-------------|
+| [`inflight_tracker`](inflight_tracker.md) | Tracks live request counts and reserved tokens per model. |
 
 ### Metering
 
@@ -143,29 +146,17 @@ see the [Praxis core filter reference][core-ref].
 |--------|-------------|
 | [`external_metering`](external_metering.md) | Integrates with an external metering service for pre-request balance checks and post-response token usage reporting. |
 
-### Model Access
-
-| Filter | Description |
-|--------|-------------|
-
 ### Model Catalog
 
 | Filter | Description |
 |--------|-------------|
 | [`model_catalog`](model_catalog.md) | Serves a configured model list as a terminal response to `GET {path}`. |
-| [`model_access`](model_access.md) | Legacy per-group model access control retained for backward-compatible deployed profiles. |
 
 ### Prompt Enrich
 
 | Filter | Description |
 |--------|-------------|
 | [`prompt_enrich`](prompt_enrich.md) | Injects statically configured messages into the `messages` array of OpenAI-compatible chat completion request bodies. |
-| [`reasoning_effort_map`](reasoning_effort_map.md) | Legacy reasoning compatibility retained for backward-compatible deployed profiles. |
-
-### Reasoning Effort Map
-
-| Filter | Description |
-|--------|-------------|
 
 ### Reject Upgrade
 

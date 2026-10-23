@@ -4,6 +4,7 @@
 [![Coverage: ≥95%](https://img.shields.io/badge/Coverage-≥95%25-brightgreen.svg)](https://github.com/praxis-proxy/ai/actions/workflows/coverage.yaml)
 [![MSRV: 1.96](https://img.shields.io/badge/MSRV-1.96-brightgreen.svg)](https://blog.rust-lang.org/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fpraxis-proxy%2Fai.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Fpraxis-proxy%2Fai?ref=badge_shield)
 
 **Praxis AI is an AI gateway built on
 [Praxis](https://github.com/praxis-proxy/praxis).** It brings provider-aware
@@ -88,9 +89,9 @@ make release
 ./target/release/praxis-ai
 ```
 
-`make release` builds the `full` feature set. A plain
-`cargo build -p praxis-ai-proxy` builds the smaller `standard` set, which
-leaves out the stateful OpenAI filter groups and their dependencies; see
+`make release` and `cargo build -p praxis-ai-proxy` build `full`, which excludes
+experimental Responses, Conversations, and the agentic loop. Opt in with
+`--features openai-all,store-sqlite` to run their examples; see
 [Cargo features](docs/features.md#cargo-features).
 
 Then check that it is running:
@@ -145,7 +146,7 @@ with a `-fips` suffix (for example `latest-fips`); see
 
 Contributions are welcome, from bug reports and documentation fixes to new
 filters and protocol support. Before opening a pull request, please read the
-[contributing guide](.github/CONTRIBUTING.md) and
+[contributing guide](CONTRIBUTING.md) and
 [development setup](docs/developing/getting-started.md).
 
 For larger changes, open a [feature request] and follow the
@@ -163,6 +164,18 @@ For larger changes, open a [feature request] and follow the
 [release documentation]: docs/release.md
 [security policy]: .github/SECURITY.md
 
+## Community
+
+Read [GOVERNANCE.md](GOVERNANCE.md) to see how our community works.
+
+Feel free to join our [discussion forums] to ask questions or share ideas.
+
+Or please join us in our Slack channel on [CNCF Slack]: [#praxis] channel
+
+[discussion forums]:https://github.com/praxis-proxy/praxis/discussions
+
 ## License
 
 Apache 2.0
+
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fpraxis-proxy%2Fai.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Fpraxis-proxy%2Fai?ref=badge_large)

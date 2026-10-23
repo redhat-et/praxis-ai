@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
 //! Model catalog filter: answers `GET /v1/models` from static config
@@ -11,8 +11,8 @@
 //! Anthropic envelope.
 //!
 //! This filter handles discovery only. Authorization — deciding who may
-//! call a model — stays with `model_access`; the catalog does not
-//! re-declare access rules.
+//! call a model — stays with the metering model-policy preflight and the
+//! routing overlay; the catalog does not re-declare access rules.
 //!
 //! ```yaml
 //! filter: model_catalog
@@ -98,7 +98,8 @@ impl CatalogModel {
 /// `GET {path}`.
 ///
 /// Discovery only: it advertises what the gateway exposes. Authorization
-/// stays with `model_access`; this filter does not enforce access.
+/// stays with the metering model-policy preflight and the routing overlay;
+/// this filter does not enforce access.
 ///
 /// # YAML configuration
 ///

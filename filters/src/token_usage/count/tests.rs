@@ -5,6 +5,7 @@
 
 use bytes::Bytes;
 use http::header::HeaderValue;
+use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 use praxis_filter::{FilterAction, HttpFilter as _, Response};
 
 use super::*;
@@ -2037,4 +2038,257 @@ async fn run_sse_extraction_at(
         ctx.get_metadata("token.output").map(str::to_owned),
         ctx.get_metadata("token.total").map(str::to_owned),
     )
+}
+
+// -----------------------------------------------------------------------------
+// LLM gateway metrics
+// -----------------------------------------------------------------------------
+
+#[test]
+#[expect(clippy::too_many_lines, reason = "test asserts many metrics")]
+fn publish_token_usage_records_llm_metrics() {
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some("cb-glm".to_owned().into());
+    ctx.set_metadata("openai_chat_completions_request.model", "gpt-x");
+
+    let usage = TokenUsage::new(12, 34, Some(46))
+        .with_cache(Some(5), None)
+        .with_reasoning(Some(2));
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || publish_token_usage(&mut ctx, usage));
+    let snap = snapshotter.snapshot().into_vec();
+
+    // Sum only series carrying the expected model/cluster labels so a
+    // resolver regression (model or cluster collapsing to "unknown") fails
+    // the totals below instead of passing on unlabeled counters.
+    let labeled_total = |name: &str| -> u64 {
+        snap.iter()
+            .filter(|(k, ..)| {
+                k.key().name() == name
+                    && k.key().labels().any(|l| l.key() == "model" && l.value() == "gpt-x")
+                    && k.key().labels().any(|l| l.key() == "cluster" && l.value() == "cb-glm")
+            })
+            .filter_map(|(_, _, _, v)| match v {
+                DebugValue::Counter(c) => Some(*c),
+                _ => None,
+            })
+            .sum()
+    };
+    let present = |name: &str| snap.iter().any(|(k, ..)| k.key().name() == name);
+
+    assert_eq!(labeled_total(crate::llm_metrics::METRIC_PROMPT_TOKENS_TOTAL), 12);
+    assert_eq!(labeled_total(crate::llm_metrics::METRIC_OUTPUT_TOKENS_TOTAL), 34);
+    assert_eq!(labeled_total(crate::llm_metrics::METRIC_CACHE_READ_TOKENS_TOTAL), 5);
+    assert_eq!(labeled_total(crate::llm_metrics::METRIC_REASONING_TOKENS_TOTAL), 2);
+    assert!(
+        !present(crate::llm_metrics::METRIC_EMPTY_COMPLETIONS_TOTAL),
+        "empty_completions must not be recorded on a non-empty response"
+    );
+}
+
+#[test]
+fn publish_token_usage_bumps_empty_completions_on_zero_output() {
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.set_metadata(crate::llm_metrics::META_MODEL_TO_HEADER_MODEL, "gpt-x");
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || {
+        publish_token_usage(&mut ctx, TokenUsage::new(12, 0, Some(12)));
+    });
+    let snap = snapshotter.snapshot().into_vec();
+
+    let total = |name: &str| -> u64 {
+        snap.iter()
+            .filter(|(k, ..)| k.key().name() == name)
+            .filter_map(|(_, _, _, v)| match v {
+                DebugValue::Counter(c) => Some(*c),
+                _ => None,
+            })
+            .sum()
+    };
+
+    assert_eq!(total(crate::llm_metrics::METRIC_EMPTY_COMPLETIONS_TOTAL), 1);
+}
+
+#[test]
+#[expect(clippy::too_many_lines, reason = "test asserts many metrics")]
+fn bedrock_headers_record_llm_metrics() {
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some("bedrock".to_owned().into());
+    ctx.set_metadata(crate::llm_metrics::META_MODEL_TO_HEADER_MODEL, "claude-x");
+    let mut headers = http::HeaderMap::new();
+    headers.insert(HEADER_BEDROCK_INPUT, HeaderValue::from_static("40"));
+    headers.insert(HEADER_BEDROCK_OUTPUT, HeaderValue::from_static("7"));
+    let mut resp = Response {
+        headers,
+        status: http::StatusCode::OK,
+    };
+    ctx.response_header = Some(&mut resp);
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || extract_bedrock_headers(&mut ctx));
+    let snap = snapshotter.snapshot().into_vec();
+
+    // Sum only series carrying the expected model/cluster labels so a
+    // resolver regression (model or cluster collapsing to "unknown") fails
+    // the totals below instead of passing on unlabeled counters.
+    let labeled_total = |name: &str| -> u64 {
+        snap.iter()
+            .filter(|(k, ..)| {
+                k.key().name() == name
+                    && k.key().labels().any(|l| l.key() == "model" && l.value() == "claude-x")
+                    && k.key().labels().any(|l| l.key() == "cluster" && l.value() == "bedrock")
+            })
+            .filter_map(|(_, _, _, v)| match v {
+                DebugValue::Counter(c) => Some(*c),
+                _ => None,
+            })
+            .sum()
+    };
+    let present = |name: &str| snap.iter().any(|(k, ..)| k.key().name() == name);
+
+    assert_eq!(labeled_total(crate::llm_metrics::METRIC_PROMPT_TOKENS_TOTAL), 40);
+    assert_eq!(labeled_total(crate::llm_metrics::METRIC_OUTPUT_TOKENS_TOTAL), 7);
+    assert!(
+        !present(crate::llm_metrics::METRIC_CACHE_READ_TOKENS_TOTAL),
+        "Bedrock headers carry no cache breakdown"
+    );
+    assert!(
+        !present(crate::llm_metrics::METRIC_EMPTY_COMPLETIONS_TOTAL),
+        "empty_completions must not be recorded on a non-empty response"
+    );
+}
+
+#[test]
+fn bedrock_headers_without_headers_record_nothing() {
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut resp = Response {
+        headers: http::HeaderMap::new(),
+        status: http::StatusCode::OK,
+    };
+    ctx.response_header = Some(&mut resp);
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || extract_bedrock_headers(&mut ctx));
+    let snap = snapshotter.snapshot().into_vec();
+
+    assert!(
+        snap.is_empty(),
+        "missing Bedrock token headers should record nothing, got {snap:?}"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// TPOT and finish-reason metrics
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn metrics_sse_openai_records_finish_reason() {
+    let filter = make_filter(ProviderKind::OpenAi);
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some("test-cluster".to_owned().into());
+    ctx.set_metadata(crate::llm_metrics::META_MODEL_TO_HEADER_MODEL, "test-model");
+
+    let mut resp = make_response_with_content_type("text/event-stream");
+    ctx.response_header = Some(&mut resp);
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+
+    let events = b"data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},\"finish_reason\":\"stop\"}]}\n\n";
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || {
+        let mut body = Some(Bytes::copy_from_slice(events));
+        drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+    });
+    let snap = snapshotter.snapshot().into_vec();
+
+    let total: u64 = snap
+        .iter()
+        .filter(|(key, ..)| {
+            key.key().name() == crate::llm_metrics::METRIC_FINISH_REASONS_TOTAL
+                && key.key().labels().any(|l| l.key() == "reason" && l.value() == "stop")
+        })
+        .filter_map(|(_, _, _, value)| match value {
+            DebugValue::Counter(count) => Some(*count),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(total, 1, "OpenAI finish_reason stop should be recorded once");
+}
+
+#[test]
+fn record_tpot_records_inter_delta_samples() {
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some("test-cluster".to_owned().into());
+    ctx.set_metadata(crate::llm_metrics::META_MODEL_TO_HEADER_MODEL, "test-model");
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || {
+        record_tpot_delta(&mut ctx);
+        record_tpot_delta(&mut ctx);
+    });
+    let snap = snapshotter.snapshot().into_vec();
+
+    let samples: usize = snap
+        .iter()
+        .filter_map(|(key, _, _, value)| {
+            if key.key().name() == crate::llm_metrics::METRIC_TPOT_SECONDS
+                && let DebugValue::Histogram(values) = value
+            {
+                Some(values.len())
+            } else {
+                None
+            }
+        })
+        .sum();
+    assert_eq!(samples, 1, "the second delta should record one TPOT sample");
+}
+
+#[test]
+fn extract_finish_reason_is_provider_aware() {
+    assert_eq!(
+        extract_finish_reason(br#"{"choices":[{"finish_reason":"stop"}]}"#, ProviderKind::OpenAi),
+        Some("stop".to_owned())
+    );
+    assert_eq!(
+        extract_finish_reason(br#"{"delta":{"stop_reason":"end_turn"}}"#, ProviderKind::Anthropic),
+        Some("end_turn".to_owned())
+    );
+    assert_eq!(
+        extract_finish_reason(
+            br#"{"candidates":[{"finishReason":"MAX_TOKENS"}]}"#,
+            ProviderKind::Google
+        ),
+        Some("MAX_TOKENS".to_owned())
+    );
+    assert_eq!(
+        extract_finish_reason(br#"{"messageStop":{"stopReason":"tool_use"}}"#, ProviderKind::Bedrock),
+        Some("tool_use".to_owned())
+    );
+    assert_eq!(extract_finish_reason(b"{}", ProviderKind::Auto), None);
+    assert_eq!(extract_finish_reason(b"{}", ProviderKind::BedrockInvokeModel), None);
+}
+
+#[test]
+fn normalize_finish_reason_bounds_labels() {
+    assert_eq!(normalize_finish_reason("stop"), "stop");
+    assert_eq!(normalize_finish_reason("end_turn"), "stop");
+    assert_eq!(normalize_finish_reason("max_tokens"), "length");
+    assert_eq!(normalize_finish_reason("tool_use"), "tool_calls");
+    assert_eq!(normalize_finish_reason("SAFETY"), "content_filter");
+    assert_eq!(normalize_finish_reason("stop_sequence"), "stop_sequence");
+    assert_eq!(normalize_finish_reason("brand_new_reason"), "other");
 }

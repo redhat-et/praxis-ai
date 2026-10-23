@@ -1,12 +1,5 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
-
-use http::HeaderValue;
-use serde_json::json;
-use wiremock::{
-    Mock, MockServer, ResponseTemplate,
-    matchers::{header, method, path, query_param},
-};
 
 use super::*;
 use crate::test_utils::{make_filter_context, make_request};
@@ -42,137 +35,11 @@ feature_key: "custom-tokens"
 source: "my-gateway"
 fail_open: false
 identity_header_prefix: "x-custom-"
-model_policy_check: true
-model_policy_fail_open: false
 "#,
     )
     .unwrap();
     let filter = ExternalMeteringFilter::from_config(&yaml).unwrap();
     assert_eq!(filter.name(), "external_metering");
-}
-
-#[test]
-fn model_policy_fail_closed_requires_model_policy_check() {
-    let yaml: serde_yaml::Value =
-        serde_yaml::from_str("metering_url: http://metering:8080\nmodel_policy_fail_open: false\n").unwrap();
-    let error = build_filter(&yaml)
-        .err()
-        .expect("fail-closed policy requires policy checking");
-    assert!(error.to_string().contains("model_policy_check"));
-}
-
-#[tokio::test]
-async fn unavailable_model_policy_can_fail_closed_independently() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str(
-        "metering_url: http://127.0.0.1:1\nallow_private_endpoint: true\nmodel_policy_check: true\nmodel_policy_fail_open: false\n",
-    )
-    .unwrap();
-    let filter = build_filter(&yaml).unwrap();
-    let action = filter.check_balance(&state_for("alice", "gpt-4")).await;
-    assert!(matches!(action, FilterAction::Reject(rejection) if rejection.status == 403));
-}
-
-#[test]
-fn config_loads_internal_auth_token_from_file() {
-    let path = std::env::temp_dir().join(format!("praxis-metering-token-{}", std::process::id()));
-    fs::write(&path, "metering-secret\n").unwrap();
-    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
-        "metering_url: http://metering:8080\ninternal_auth_file: {:?}\n",
-        path.to_string_lossy()
-    ))
-    .unwrap();
-
-    let filter = build_filter(&yaml).unwrap();
-    assert_eq!(
-        filter.internal_auth_token.as_ref().unwrap().to_str().unwrap(),
-        "Bearer metering-secret"
-    );
-    fs::remove_file(path).unwrap();
-}
-
-#[test]
-fn internal_auth_token_rejects_empty_and_whitespace_values() {
-    for (suffix, content) in [("empty", ""), ("whitespace", "token with-space")] {
-        let path = std::env::temp_dir().join(format!("praxis-metering-token-{suffix}-{}", std::process::id()));
-        fs::write(&path, content).unwrap();
-        let result = read_internal_auth_token(path.to_str().unwrap());
-        assert!(result.is_err(), "{suffix} token must fail closed");
-        fs::remove_file(path).unwrap();
-    }
-}
-
-#[test]
-fn internal_auth_headers_build_bearer_header() {
-    let path = std::env::temp_dir().join(format!("praxis-metering-token-header-{}", std::process::id()));
-    fs::write(&path, "metering-secret").unwrap();
-    let token = read_internal_auth_token(path.to_str().unwrap()).unwrap();
-    let headers = internal_auth_headers(Some(&token));
-    assert_eq!(headers.get("authorization").unwrap(), "Bearer metering-secret");
-    fs::remove_file(path).unwrap();
-}
-
-#[tokio::test]
-#[expect(clippy::too_many_lines, reason = "mock setup exercises both metering callout paths")]
-async fn internal_auth_is_sent_on_entitlement_and_event_subrequests() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/customers/alice/entitlements/inference-tokens/value"))
-        .and(query_param("model", "gpt-4"))
-        .and(header("authorization", "Bearer metering-secret"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"hasAccess": true})))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/api/v1/events"))
-        .and(header("authorization", "Bearer metering-secret"))
-        .respond_with(ResponseTemplate::new(204))
-        .mount(&server)
-        .await;
-
-    let token_path = std::env::temp_dir().join(format!("praxis-metering-live-token-{}", std::process::id()));
-    fs::write(&token_path, "metering-secret\n").unwrap();
-    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
-        "metering_url: {}\nallow_private_endpoint: true\ninternal_auth_file: {:?}\n",
-        server.uri(),
-        token_path.to_string_lossy()
-    ))
-    .unwrap();
-    let filter = build_filter(&yaml).unwrap();
-    let state = state_for("alice", "gpt-4");
-    assert!(matches!(filter.check_balance(&state).await, FilterAction::Continue));
-
-    let tokens = TokenCounts {
-        input: 2,
-        output: 1,
-        total: 3,
-        reasoning: 0,
-        cache_read: 0,
-        cache_write: 0,
-    };
-    let event = build_usage_event(&event_ctx("event-1", &state), &tokens);
-    spawn_usage_report(
-        filter.subrequest_client.clone(),
-        MeteringReportConfig {
-            url: format!("{}/api/v1/events", server.uri()),
-            timeout: filter.timeout,
-            address_policy: filter.address_policy,
-            internal_auth_token: filter.internal_auth_token.clone(),
-        },
-        &event,
-    );
-
-    for _ in 0..50 {
-        if server.received_requests().await.unwrap().len() >= 2 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 2, "both metering paths should be called");
-    for request in requests {
-        assert_eq!(request.headers.get("authorization").unwrap(), "Bearer metering-secret");
-    }
-    fs::remove_file(token_path).unwrap();
 }
 
 #[test]
@@ -189,22 +56,6 @@ default_model: "unknown"
 
     assert_eq!(filter.default_username.as_deref(), Some("anonymous"));
     assert_eq!(filter.default_model.as_deref(), Some("unknown"));
-}
-
-#[test]
-fn model_policy_check_buffers_only_when_enabled() {
-    let stream = build_filter(&serde_yaml::from_str("metering_url: http://metering:8080\n").unwrap()).unwrap();
-    assert_eq!(stream.request_body_mode(), BodyMode::Stream);
-
-    let buffered =
-        build_filter(&serde_yaml::from_str("metering_url: http://metering:8080\nmodel_policy_check: true\n").unwrap())
-            .unwrap();
-    assert_eq!(
-        buffered.request_body_mode(),
-        BodyMode::StreamBuffer {
-            max_bytes: Some(MODEL_POLICY_BODY_BUFFER_BYTES),
-        }
-    );
 }
 
 #[test]
@@ -376,6 +227,17 @@ fn provider_resolved_public_model_wins_over_rewritten_body_model() {
     assert_eq!(filter.resolve_report_model(&ctx, &state), "claude-sonnet-4-5");
 }
 
+#[test]
+fn provider_resolved_model_does_not_override_captured_identity_model() {
+    let filter = filter_from_yaml("metering_url: \"http://metering:8080\"\n");
+    let req = make_request(http::Method::POST, "/v1/messages");
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata(MODEL_PROVIDER_CLIENT_MODEL_METADATA, "claude-sonnet-4-5");
+    let state = state_for("alice", "tenant-model");
+
+    assert_eq!(filter.resolve_report_model(&ctx, &state), "tenant-model");
+}
+
 #[tokio::test]
 async fn provider_resolved_public_model_is_used_for_balance_check() {
     let filter = filter_from_yaml(
@@ -394,69 +256,6 @@ async fn provider_resolved_public_model_is_used_for_balance_check() {
         .find_map(|value| value.downcast_ref::<MeteringState>())
         .expect("on_request stores metering state");
     assert_eq!(state.model, "claude-sonnet-4-5");
-}
-
-#[tokio::test]
-async fn body_promoted_x_model_is_used_for_balance_check() {
-    let filter = filter_from_yaml("metering_url: \"http://127.0.0.1:1\"\ndefault_username: \"alice\"\n");
-    let req = make_request(http::Method::POST, "/v1/chat/completions");
-    let mut ctx = make_filter_context(&req);
-    ctx.request_headers_to_set.push((
-        HeaderName::from_static("x-model"),
-        HeaderValue::from_static("gpt-5.6-luna"),
-    ));
-
-    let action = filter.on_request(&mut ctx).await.unwrap();
-    assert!(matches!(action, FilterAction::Continue));
-    let state = ctx
-        .filter_state
-        .values()
-        .find_map(|value| value.downcast_ref::<MeteringState>())
-        .expect("on_request stores metering state");
-    assert_eq!(state.model, "gpt-5.6-luna");
-    assert!(
-        build_balance_url("http://metering:8080", "alice", "inference-tokens", &state.model)
-            .contains("model=gpt-5.6-luna")
-    );
-}
-
-#[tokio::test]
-async fn buffered_json_model_is_used_when_model_policy_check_is_enabled() {
-    let filter = filter_from_yaml(
-        "metering_url: \"http://127.0.0.1:1\"\ndefault_username: \"alice\"\nmodel_policy_check: true\n",
-    );
-    let req = make_request(http::Method::POST, "/v1/chat/completions");
-    let mut ctx = make_filter_context(&req);
-    ctx.buffered_request_body = Some(Bytes::from_static(br#"{"model":"model-from-body","messages":[]}"#));
-
-    let action = filter.on_request(&mut ctx).await.unwrap();
-    assert!(matches!(action, FilterAction::Continue));
-    let state = ctx
-        .filter_state
-        .values()
-        .find_map(|value| value.downcast_ref::<MeteringState>())
-        .expect("on_request stores metering state");
-    assert_eq!(state.model, "model-from-body");
-}
-
-#[tokio::test]
-async fn raw_client_x_model_is_not_trusted_for_balance_check() {
-    let filter = filter_from_yaml("metering_url: \"http://127.0.0.1:1\"\ndefault_username: \"alice\"\n");
-    let mut req = make_request(http::Method::POST, "/v1/chat/completions");
-    req.headers.insert("x-model", "spoofed-model".parse().unwrap());
-    let mut ctx = make_filter_context(&req);
-
-    let action = filter.on_request(&mut ctx).await.unwrap();
-    assert!(matches!(action, FilterAction::Continue));
-    let state = ctx
-        .filter_state
-        .values()
-        .find_map(|value| value.downcast_ref::<MeteringState>())
-        .expect("on_request stores metering state");
-    assert!(
-        state.model.is_empty(),
-        "raw client x-model must not select policy model"
-    );
 }
 
 #[test]
@@ -565,17 +364,6 @@ fn balance_response_no_access_rejects() {
 }
 
 #[test]
-fn model_allowlist_denial_is_forbidden_not_quota_exhausted() {
-    let body = br#"{"hasAccess": false, "modelAllowed": false}"#;
-    let rejection = match parse_balance_result(body, true) {
-        FilterAction::Reject(rejection) => Some(rejection),
-        _ => None,
-    }
-    .expect("disallowed model should reject even with fail-open enabled");
-    assert_eq!(rejection.status, http::StatusCode::FORBIDDEN.as_u16());
-}
-
-#[test]
 fn balance_response_invalid_json_fail_open() {
     let body = b"not json";
     let action = parse_balance_result(body, true);
@@ -649,6 +437,8 @@ fn usage_event_has_correct_structure() {
     assert_eq!(event["data"]["reasoning_tokens"], 30);
     assert_eq!(event["data"]["duration_ms"], 500);
     assert_eq!(event["data"]["model"], "gpt-4");
+    assert_eq!(event["data"]["organization_id"], "org-1");
+    assert_eq!(event["data"]["cost_center"], "cc-42");
 }
 
 #[test]
@@ -710,6 +500,30 @@ fn error_event_has_correct_structure() {
     assert_eq!(event["type"], CE_TYPE_ERROR);
     assert_eq!(event["data"]["status_code"], 500);
     assert_eq!(event["data"]["user"], "testuser");
+    assert_eq!(event["data"]["organization_id"], "org-1");
+    assert_eq!(event["data"]["cost_center"], "cc-42");
+}
+
+#[test]
+fn absent_organization_and_cost_center_emit_empty_strings() {
+    let mut state = state_for("testuser", "gpt-4");
+    state.organization_id.clear();
+    state.cost_center.clear();
+
+    let event = build_usage_event(
+        &event_ctx("evt-empty", &state),
+        &TokenCounts {
+            input: 1,
+            output: 1,
+            total: 2,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        },
+    );
+
+    assert_eq!(event["data"]["organization_id"], "");
+    assert_eq!(event["data"]["cost_center"], "");
 }
 
 // -----------------------------------------------------------------------------
@@ -723,6 +537,8 @@ fn captures_tenant_headers_with_default_prefix() {
     req.headers.insert("x-tenant-group", "engineering".parse().unwrap());
     req.headers.insert("x-tenant-subscription", "sub-42".parse().unwrap());
     req.headers.insert("x-tenant-model", "gpt-4".parse().unwrap());
+    req.headers.insert("x-tenant-organization-id", "org-9".parse().unwrap());
+    req.headers.insert("x-tenant-cost-center", "cc-7".parse().unwrap());
 
     let mut ctx = make_filter_context(&req);
     let state = capture_identity(&mut ctx, "x-tenant-", "identity");
@@ -731,6 +547,8 @@ fn captures_tenant_headers_with_default_prefix() {
     assert_eq!(state.group, "engineering");
     assert_eq!(state.subscription, "sub-42");
     assert_eq!(state.model, "gpt-4");
+    assert_eq!(state.organization_id, "org-9");
+    assert_eq!(state.cost_center, "cc-7");
 }
 
 #[test]
@@ -738,12 +556,16 @@ fn strips_identity_and_auth_headers() {
     let mut req = make_request(http::Method::POST, "/v1/chat/completions");
     req.headers.insert("x-tenant-username", "alice".parse().unwrap());
     req.headers.insert("authorization", "Bearer sk-test".parse().unwrap());
+    req.headers.insert("x-tenant-organization-id", "org-9".parse().unwrap());
+    req.headers.insert("x-tenant-cost-center", "cc-7".parse().unwrap());
 
     let mut ctx = make_filter_context(&req);
     let _state = capture_identity(&mut ctx, "x-tenant-", "identity");
 
     let removed: Vec<&str> = ctx.request_headers_to_remove.iter().map(HeaderName::as_str).collect();
     assert!(removed.contains(&"x-tenant-username"));
+    assert!(removed.contains(&"x-tenant-organization-id"));
+    assert!(removed.contains(&"x-tenant-cost-center"));
     assert!(removed.contains(&"authorization"));
     assert!(removed.contains(&"x-api-key"));
 }
@@ -802,6 +624,29 @@ fn verified_identity_ignores_forged_headers_and_guard_metadata() {
         "forged model must be ignored when identity is verified: {}",
         state.model
     );
+}
+
+#[test]
+fn verified_billing_identity_ignores_forged_org_and_cost_center() {
+    let mut req = make_request(http::Method::POST, "/v1/chat/completions");
+    req.headers
+        .insert("x-tenant-organization-id", "org-forged".parse().unwrap());
+    req.headers.insert("x-tenant-cost-center", "cc-forged".parse().unwrap());
+
+    let mut ctx = make_filter_context(&req);
+    ctx.filter_metadata
+        .insert("x-tenant-organization-id".to_owned(), "org-verified".to_owned());
+    ctx.filter_metadata
+        .insert("x-tenant-cost-center".to_owned(), "cc-verified".to_owned());
+    ctx.filter_metadata
+        .insert("identity.x-tenant-organization-id".to_owned(), "org-forged".to_owned());
+    ctx.filter_metadata
+        .insert("identity.x-tenant-cost-center".to_owned(), "cc-forged".to_owned());
+
+    let state = capture_identity(&mut ctx, "x-tenant-", "identity");
+
+    assert_eq!(state.organization_id, "org-verified");
+    assert_eq!(state.cost_center, "cc-verified");
 }
 
 #[test]
@@ -1122,6 +967,202 @@ fn response_body_without_state_is_noop() {
     assert!(matches!(action, FilterAction::Continue));
 }
 
+// -----------------------------------------------------------------------------
+// Internal Auth Token (issue #1721)
+// -----------------------------------------------------------------------------
+
+#[test]
+fn internal_auth_token_value_builds_authenticated_filter() {
+    let filter = filter_from_yaml("metering_url: \"http://metering:8080\"\ninternal_auth_token:\n  value: mtoken\n");
+    assert!(
+        filter.auth_token.is_some(),
+        "a configured internal_auth_token must publish an auth handle"
+    );
+}
+
+#[test]
+fn no_internal_auth_token_leaves_callouts_unauthenticated() {
+    let filter = filter_from_yaml("metering_url: \"http://metering:8080\"\n");
+    assert!(filter.auth_token.is_none());
+    assert!(
+        matches!(filter.auth_header(), AuthOutcome::Unauthenticated),
+        "omitting internal_auth_token must resolve to Unauthenticated (unchanged legacy behavior)"
+    );
+}
+
+#[test]
+fn internal_auth_token_resolves_to_sensitive_bearer_header() {
+    let filter = filter_from_yaml("metering_url: \"http://metering:8080\"\ninternal_auth_token:\n  value: mtoken\n");
+    let AuthOutcome::Header(value) = filter.auth_header() else {
+        panic!("a configured token must resolve to an authenticated header outcome");
+    };
+    assert_eq!(value.to_str().unwrap(), "Bearer mtoken");
+    assert!(
+        value.is_sensitive(),
+        "the Authorization header must be marked sensitive so it is never logged"
+    );
+}
+
+#[test]
+fn auth_outcome_from_missing_payload_fails_closed() {
+    // A post-startup rotation gap publishes a None payload; the callout must
+    // not be sent unauthenticated.
+    assert!(matches!(auth_outcome_from_payload(None), AuthOutcome::Unavailable));
+}
+
+#[test]
+fn auth_outcome_from_payload_builds_sensitive_header() {
+    let AuthOutcome::Header(value) = auth_outcome_from_payload(Some("Bearer tok")) else {
+        panic!("a valid payload must resolve to a header");
+    };
+    assert_eq!(value.to_str().unwrap(), "Bearer tok");
+    assert!(value.is_sensitive());
+}
+
+#[test]
+fn auth_outcome_from_invalid_payload_fails_closed() {
+    // A payload that cannot form a legal header value fails closed rather than
+    // panicking or sending garbage (defense in depth; the transform already
+    // validates at publication).
+    assert!(matches!(
+        auth_outcome_from_payload(Some("bad\nvalue")),
+        AuthOutcome::Unavailable
+    ));
+}
+
+#[test]
+fn authed_headers_unauthenticated_sends_no_authorization() {
+    let headers = authed_headers(AuthOutcome::Unauthenticated).expect("unauthenticated must not fail closed");
+    assert!(headers.is_empty());
+}
+
+#[test]
+fn authed_headers_attaches_authorization() {
+    let value = http::HeaderValue::from_static("Bearer tok");
+    let headers = authed_headers(AuthOutcome::Header(value)).expect("an available token must not fail closed");
+    assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer tok");
+}
+
+#[test]
+fn authed_headers_unavailable_fails_closed() {
+    assert!(
+        authed_headers(AuthOutcome::Unavailable).is_none(),
+        "an unavailable token must fail the callout closed (no unauthenticated send)"
+    );
+}
+
+#[test]
+fn balance_callout_fail_open_admits_on_unavailable_token() {
+    let filter = filter_from_yaml("metering_url: \"http://metering:8080\"\nfail_open: true\n");
+    assert!(
+        matches!(
+            filter.balance_callout_headers(AuthOutcome::Unavailable),
+            Err(FilterAction::Continue)
+        ),
+        "a token gap must not send an unauthenticated balance callout; fail_open then admits"
+    );
+}
+
+#[test]
+fn balance_callout_fail_closed_rejects_on_unavailable_token() {
+    let filter = filter_from_yaml("metering_url: \"http://metering:8080\"\nfail_open: false\n");
+    assert!(
+        matches!(
+            filter.balance_callout_headers(AuthOutcome::Unavailable),
+            Err(FilterAction::Reject(_))
+        ),
+        "a token gap must not send an unauthenticated balance callout; fail_closed then rejects"
+    );
+}
+
+#[test]
+fn balance_callout_attaches_authorization_when_available() {
+    let filter = filter_from_yaml("metering_url: \"http://metering:8080\"\n");
+    match filter.balance_callout_headers(AuthOutcome::Header(http::HeaderValue::from_static("Bearer tok"))) {
+        Ok(headers) => assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer tok"),
+        Err(_) => panic!("an available token must produce authenticated balance headers"),
+    }
+}
+
+#[test]
+fn balance_callout_unauthenticated_when_no_token() {
+    let filter = filter_from_yaml("metering_url: \"http://metering:8080\"\n");
+    match filter.balance_callout_headers(AuthOutcome::Unauthenticated) {
+        Ok(headers) => assert!(
+            headers.is_empty(),
+            "no token configured must send an unauthenticated callout"
+        ),
+        Err(_) => panic!("no token configured must not fail closed"),
+    }
+}
+
+#[test]
+fn report_callout_drops_on_unavailable_token() {
+    assert!(
+        report_callout_headers(AuthOutcome::Unavailable).is_none(),
+        "a token gap must drop the usage report rather than send it unauthenticated"
+    );
+}
+
+#[test]
+fn report_callout_attaches_authorization_when_available() {
+    match report_callout_headers(AuthOutcome::Header(http::HeaderValue::from_static("Bearer tok"))) {
+        Some(headers) => assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer tok"),
+        None => panic!("an available token must produce authenticated usage-report headers"),
+    }
+}
+
+#[test]
+fn internal_auth_token_empty_value_fails_build() {
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str("metering_url: \"http://metering:8080\"\ninternal_auth_token:\n  value: \"\"\n").unwrap();
+    assert!(
+        ExternalMeteringFilter::from_config(&yaml).is_err(),
+        "an empty internal_auth_token must fail loud at startup"
+    );
+}
+
+#[test]
+fn internal_auth_token_invalid_header_value_fails_build() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "metering_url: \"http://metering:8080\"\ninternal_auth_token:\n  value: \"bad\\nvalue\"\n",
+    )
+    .unwrap();
+    assert!(
+        ExternalMeteringFilter::from_config(&yaml).is_err(),
+        "a token that cannot form a legal header value must fail at startup"
+    );
+}
+
+#[test]
+fn internal_auth_token_missing_file_fails_build() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "metering_url: \"http://metering:8080\"\ninternal_auth_token:\n  file: \"/nonexistent/praxis-metering-token-xyz\"\n",
+    )
+    .unwrap();
+    assert!(
+        ExternalMeteringFilter::from_config(&yaml).is_err(),
+        "an unreadable token file must fail loud at startup"
+    );
+}
+
+#[test]
+fn internal_auth_token_debug_redacts_inline_value() {
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str("metering_url: \"http://metering:8080\"\ninternal_auth_token:\n  value: top-secret-xyz\n")
+            .unwrap();
+    let cfg = parse_filter_config::<ExternalMeteringConfig>("external_metering", &yaml).unwrap();
+    let rendered = format!("{cfg:?}");
+    assert!(
+        !rendered.contains("top-secret-xyz"),
+        "config Debug must not leak the inline token: {rendered}"
+    );
+    assert!(
+        rendered.contains("[REDACTED]"),
+        "config Debug must redact the inline token: {rendered}"
+    );
+}
+
 fn event_ctx<'a>(event_id: &'a str, state: &'a MeteringState) -> EventContext<'a> {
     EventContext {
         duration_ms: 500,
@@ -1137,6 +1178,8 @@ fn state_for(username: &str, model: &str) -> MeteringState {
         username: username.into(),
         group: "engineering".into(),
         subscription: "sub-1".into(),
+        organization_id: "org-1".into(),
+        cost_center: "cc-42".into(),
         model: model.into(),
         user_agent: "test/1.0".into(),
         request_start: std::time::Instant::now(),

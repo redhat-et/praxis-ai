@@ -1,8 +1,9 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
 //! Deserialized YAML configuration types for the external metering filter.
 
+use praxis_ai_apis::credential_source::CredentialSource;
 use praxis_filter::FilterError;
 use serde::Deserialize;
 
@@ -81,7 +82,8 @@ pub(super) struct ExternalMeteringConfig {
 
     /// Prefix for tenant identity headers to capture and strip.
     /// Expected headers: `{prefix}username`, `{prefix}group`,
-    /// `{prefix}subscription`, `{prefix}model`.
+    /// `{prefix}subscription`, `{prefix}model`, `{prefix}organization-id`,
+    /// `{prefix}cost-center`.
     #[serde(default = "default_identity_header_prefix")]
     pub identity_header_prefix: String,
 
@@ -106,6 +108,15 @@ pub(super) struct ExternalMeteringConfig {
     /// Fallback model name when no identity model header is present.
     #[serde(default)]
     pub default_model: Option<String>,
+
+    /// Optional internal bearer token for authenticating metering callouts
+    /// (the balance check and the usage report). One of `value | env_var |
+    /// file`, read through the shared [`CredentialSource`] core: bounded reads,
+    /// restart-free file rotation (ideal for a Kubernetes projected Secret),
+    /// and fail-closed publication. When omitted, callouts are sent
+    /// unauthenticated (unchanged behavior).
+    #[serde(default)]
+    pub internal_auth_token: Option<CredentialSource>,
 
     /// Buffer the request body before the entitlement check so the public
     /// model ID can be included in the preflight. Enable when the metering
@@ -145,6 +156,10 @@ pub(super) fn validate_config(cfg: &ExternalMeteringConfig) -> Result<(), Filter
 
     if cfg.identity_metadata_namespace.is_empty() {
         return Err("external_metering: identity_metadata_namespace must not be empty".into());
+    }
+
+    if cfg.internal_auth_file.is_some() && cfg.internal_auth_token.is_some() {
+        return Err("external_metering: set only one of internal_auth_file or internal_auth_token".into());
     }
 
     if !cfg.model_policy_fail_open && !cfg.model_policy_check {

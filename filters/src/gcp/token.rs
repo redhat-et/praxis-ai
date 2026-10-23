@@ -3,38 +3,66 @@
 
 //! Credential-source resolution and token fetch for [`GcpAdcFilter`].
 //!
-//! [`fetch`] acquires a token for the [`Metadata`](TokenSource::Metadata)
-//! source from the GCE/GKE metadata server. The
-//! [`ServiceAccountKey`](TokenSource::ServiceAccountKey) mints a token by
-//! signing a short-lived `JWT` assertion and exchanging it at Google's
-//! `OAuth2` token endpoint.
+//! Two credential flows live here:
+//!
+//! - [`TokenSource::Metadata`] acquires a token from the GCE/GKE metadata server, which returns one on request for the
+//!   VM's attached service account.
+//! - [`TokenSource::ServiceAccountKey`] (a parsed `type: service_account` key file) mints a token itself: it signs a
+//!   `JWT` assertion with the key file's private key through the system OpenSSL and exchanges it at Google's `OAuth2`
+//!   token endpoint for a short-lived access token (`urn:ietf:params:oauth:grant-type:jwt-bearer`). Nothing is cached
+//!   at this layer: caching is [`TokenCache`](praxis_ai_apis::token_cache::TokenCache)'s job.
 
-use std::{path::Path, time::Duration};
+use std::{fmt, path::Path, time::Duration};
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
 use http::HeaderValue;
+use openssl::{
+    hash::MessageDigest,
+    pkey::{Id, PKey, Private},
+    rsa::Padding,
+    sign::Signer,
+};
 use praxis_ai_apis::{
     callout_target::AddressPolicy,
-    subrequest::{SubRequest, SubRequestClient, execute_url},
+    subrequest::{SubRequest, SubRequestClient, SubResponse, UrlResolutionPolicy, address_policy_hook, map_url_error},
 };
 use praxis_filter::FilterError;
 use serde::Deserialize;
+use zeroize::Zeroizing;
 
 use super::config::{GcpAdcConfig, GcpAdcSource};
 
-/// `OAuth2` JWT bearer grant type.
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// `OAuth2` grant type for a signed service-account assertion, per
+/// [RFC 7523 Section 2.1].
+///
+/// [RFC 7523 Section 2.1]: https://datatracker.ietf.org/doc/html/rfc7523#section-2.1
 const JWT_BEARER_GRANT: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
-/// Lifetime used for signed service-account assertions.
+
+/// Lifetime of a signed assertion. Google accepts up to one hour; a
+/// shorter lifetime narrows the window in which a leaked assertion can
+/// be replayed against the token endpoint.
 const ASSERTION_LIFETIME: Duration = Duration::from_secs(600);
-/// Google `OAuth2` token host accepted by credential-file validation.
-const GOOGLE_TOKEN_HOST: &str = "oauth2.googleapis.com";
+
+/// `JOSE` header of every assertion: `RS256` (RSA PKCS#1 v1.5 over
+/// SHA-256) is what Google's token endpoint expects for service-account
+/// keys.
+const ASSERTION_HEADER: &str = r#"{"alg":"RS256","typ":"JWT"}"#;
+
+/// The only token endpoint a key file's `token_uri` may name: Google's
+/// `OAuth2` token endpoint.
+const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 
 // -----------------------------------------------------------------------------
 // TokenSource
 // -----------------------------------------------------------------------------
 
 /// Resolved credential source used to fetch a token.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub(super) enum TokenSource {
     /// GCE/GKE/Cloud Run metadata server.
     Metadata {
@@ -42,32 +70,51 @@ pub(super) enum TokenSource {
         service_account: String,
     },
 
-    /// Parsed `type: service_account` key file.
+    /// Parsed and validated `type: service_account` key file; the token
+    /// is minted by signing a `JWT` assertion with its private key.
     ServiceAccountKey(ServiceAccountKey),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-/// Parsed service-account credential file.
+/// The fields of a `type: service_account` key file needed to mint an
+/// access token, validated and parsed at construct time.
+///
+/// `Debug` is written by hand so the private key never reaches a log line
+/// or an assertion message.
 pub(super) struct ServiceAccountKey {
-    /// Service-account email used as the JWT issuer.
+    /// `client_email`: the `iss` claim and the identity the token is
+    /// minted for.
     pub client_email: String,
-    /// PEM-encoded RSA private key used to sign the assertion.
-    pub private_key_pem: String,
-    /// Validated `OAuth2` token endpoint.
+
+    /// RSA private key that signs the assertion, parsed from the key
+    /// file's PEM.
+    pub private_key: PKey<Private>,
+
+    /// Validated token endpoint URL (`token_uri`): [`GOOGLE_TOKEN_URL`]
+    /// outside this crate's unit tests.
     pub token_url: String,
-    /// Whether the endpoint is a loopback test endpoint.
-    pub loopback_test: bool,
+}
+
+impl fmt::Debug for ServiceAccountKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServiceAccountKey")
+            .field("client_email", &self.client_email)
+            .field("token_url", &self.token_url)
+            .finish_non_exhaustive()
+    }
 }
 
 // -----------------------------------------------------------------------------
 // Fetch
 // -----------------------------------------------------------------------------
 
+/// Response body from a Google `OAuth2` token endpoint (the metadata
+/// server's token endpoint and `oauth2.googleapis.com` return the same
+/// shape). Extra fields (`token_type`, `scope`, …) are ignored.
 #[derive(Debug, Deserialize)]
-/// `OAuth2` token endpoint response.
 struct TokenEndpointResponse {
-    /// Bearer access token.
+    /// The `OAuth2` access token.
     access_token: String,
+
     /// Token lifetime in seconds.
     expires_in: u64,
 }
@@ -80,7 +127,7 @@ struct TokenEndpointResponse {
 ///
 /// # Errors
 ///
-/// Returns [`FilterError`] if the metadata request fails, returns a
+/// Returns [`FilterError`] if the token request fails, returns a
 /// non-success status, or its body cannot be parsed.
 #[cfg(test)]
 pub(super) async fn fetch(
@@ -95,15 +142,18 @@ pub(super) async fn fetch(
             fetch_metadata_token(client, metadata_host, service_account, scope, timeout).await
         },
         TokenSource::ServiceAccountKey(key) => {
-            fetch_service_account_token(client, key, scope, timeout, AddressPolicy::AllowPrivate).await
+            fetch_service_account_token(client, key, scope, timeout, token_address_policy(&key.token_url)).await
         },
     }
 }
 
-/// Acquire a token through `SubRequestClient` targeting the metadata server.
+/// Acquire a token for `source` through `SubRequestClient`.
 ///
 /// The metadata protocol intentionally targets a private endpoint. The
 /// configured host is separately restricted to Google's metadata hostname.
+///
+/// The service-account key source only reaches Google's public token
+/// endpoint, so it is public-only.
 pub(super) async fn fetch_pinned(
     client: &SubRequestClient,
     source: &TokenSource,
@@ -117,12 +167,7 @@ pub(super) async fn fetch_pinned(
             fetch_metadata_token_url(client, &url, timeout, metadata_address_policy(metadata_host)).await
         },
         TokenSource::ServiceAccountKey(key) => {
-            let policy = if key.loopback_test {
-                AddressPolicy::AllowPrivate
-            } else {
-                AddressPolicy::PublicOnly
-            };
-            fetch_service_account_token(client, key, scope, timeout, policy).await
+            fetch_service_account_token(client, key, scope, timeout, token_address_policy(&key.token_url)).await
         },
     }
 }
@@ -141,6 +186,22 @@ fn metadata_address_policy(metadata_host: &str) -> AddressPolicy {
 #[cfg(not(test))]
 fn metadata_address_policy(_metadata_host: &str) -> AddressPolicy {
     AddressPolicy::AllowGoogleMetadata
+}
+
+/// Use the production public-only policy except for the loopback mocks
+/// [`validate_token_uri`] admits in this crate's unit tests.
+#[cfg(test)]
+fn token_address_policy(token_url: &str) -> AddressPolicy {
+    if token_url == GOOGLE_TOKEN_URL {
+        return AddressPolicy::PublicOnly;
+    }
+    AddressPolicy::AllowPrivate
+}
+
+/// Google's token endpoint is public; production builds reach nothing else.
+#[cfg(not(test))]
+fn token_address_policy(_token_url: &str) -> AddressPolicy {
+    AddressPolicy::PublicOnly
 }
 
 /// Acquire a token from the GCE/GKE metadata server.
@@ -164,6 +225,21 @@ fn metadata_token_url(metadata_host: &str, service_account: &str, scope: &str) -
     url
 }
 
+/// A bodiless GET sub-request carrying the GCE metadata flavor header.
+fn metadata_token_request() -> SubRequest {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::HeaderName::from_static("metadata-flavor"),
+        HeaderValue::from_static("Google"),
+    );
+    SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::default(),
+        headers,
+        body: Bytes::new(),
+    }
+}
+
 /// Send one metadata token request via `SubRequestClient`.
 async fn fetch_metadata_token_url(
     client: &SubRequestClient,
@@ -171,26 +247,27 @@ async fn fetch_metadata_token_url(
     timeout: Duration,
     address_policy: AddressPolicy,
 ) -> Result<(HeaderValue, Duration), FilterError> {
-    let mut headers = http::HeaderMap::new();
-    headers.insert(
-        http::HeaderName::from_static("metadata-flavor"),
-        HeaderValue::from_static("Google"),
-    );
-    let request = SubRequest {
-        method: http::Method::GET,
-        uri: http::Uri::default(),
-        headers,
-        body: Bytes::new(),
-    };
+    let request = metadata_token_request();
 
-    let response = execute_url(client, url, request, 65_536, timeout, address_policy)
+    let response = client
+        .execute_url(
+            url,
+            request,
+            address_policy_hook(address_policy),
+            UrlResolutionPolicy::OperatorCached,
+            timeout,
+            65_536,
+            None,
+        )
         .await
+        .map_err(map_url_error)
         .map_err(|e| FilterError::from(format!("gcp_adc: metadata token request failed: {e}")))?;
 
-    parse_token_response(response.status, &response.body, "metadata")
+    parse_token_response(&response, "metadata")
 }
 
-/// Exchange a signed service-account assertion for an `OAuth2` token.
+/// Mint an access token from a service-account key file: sign a `JWT`
+/// assertion and exchange it at the (already validated) token endpoint.
 async fn fetch_service_account_token(
     client: &SubRequestClient,
     key: &ServiceAccountKey,
@@ -199,78 +276,128 @@ async fn fetch_service_account_token(
     address_policy: AddressPolicy,
 ) -> Result<(HeaderValue, Duration), FilterError> {
     let assertion = sign_assertion(key, scope)?;
-    let body = format!(
-        "grant_type={JWT_BEARER_GRANT}&assertion={assertion}",
-        assertion = url::form_urlencoded::byte_serialize(assertion.as_bytes()).collect::<String>()
-    );
+
+    let request = service_account_token_request(&assertion);
+
+    let response = client
+        .execute_url(
+            &key.token_url,
+            request,
+            address_policy_hook(address_policy),
+            UrlResolutionPolicy::OperatorCached,
+            timeout,
+            65_536,
+            None,
+        )
+        .await
+        .map_err(map_url_error)
+        .map_err(|e| FilterError::from(format!("gcp_adc: service-account token request failed: {e}")))?;
+
+    parse_token_response(&response, "service-account key")
+}
+
+/// A form-encoded assertion exchange request, containing no downstream headers.
+fn service_account_token_request(assertion: &str) -> SubRequest {
+    let body = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("grant_type", JWT_BEARER_GRANT)
+        .append_pair("assertion", assertion)
+        .finish();
     let mut headers = http::HeaderMap::new();
     headers.insert(
         http::header::CONTENT_TYPE,
         HeaderValue::from_static("application/x-www-form-urlencoded"),
     );
-    let request = SubRequest {
+    SubRequest {
         method: http::Method::POST,
         uri: http::Uri::default(),
         headers,
         body: Bytes::from(body),
-    };
-    let response = execute_url(client, &key.token_url, request, 65_536, timeout, address_policy)
-        .await
-        .map_err(|e| FilterError::from(format!("gcp_adc: service-account token request failed: {e}")))?;
-    parse_token_response(response.status, &response.body, "service-account")
+    }
 }
 
+/// The assertion claims required by [Google's service-account flow]:
+/// `iss` is the service-account email, `aud` the token endpoint, and
+/// `scope` the requested `OAuth2` scope.
+///
+/// [Google's service-account flow]: https://developers.google.com/identity/protocols/oauth2/service-account#httprest
 #[derive(serde::Serialize)]
-/// Claims carried by a service-account JWT assertion.
 struct AssertionClaims<'a> {
-    /// Service-account issuer.
+    /// The service-account email asserting the request.
     iss: &'a str,
-    /// Requested `OAuth2` scope.
+    /// The `OAuth2` scope requested with the minted token.
     scope: &'a str,
-    /// Token endpoint audience.
+    /// The token endpoint this assertion is valid at.
     aud: &'a str,
-    /// Assertion issue time.
+    /// Issuance time, seconds since the Unix epoch.
     iat: u64,
-    /// Assertion expiry time.
+    /// Expiry time, seconds since the Unix epoch.
     exp: u64,
 }
 
-/// Sign a short-lived service-account JWT assertion.
+/// Sign the `JWT`-bearer assertion for `key`: base64url header and claims,
+/// then their `RS256` signature, computed by the system OpenSSL so it runs
+/// inside the validated module on a FIPS host.
 fn sign_assertion(key: &ServiceAccountKey, scope: &str) -> Result<String, FilterError> {
+    let claims = assertion_claims(key, scope)?;
+
+    let mut assertion = URL_SAFE_NO_PAD.encode(ASSERTION_HEADER);
+    assertion.push('.');
+    URL_SAFE_NO_PAD.encode_string(claims, &mut assertion);
+
+    let signature = rs256_signature(key, assertion.as_bytes())?;
+    assertion.push('.');
+    URL_SAFE_NO_PAD.encode_string(signature, &mut assertion);
+    Ok(assertion)
+}
+
+/// Serialize the assertion claims for `key`, issued now and valid for
+/// [`ASSERTION_LIFETIME`].
+fn assertion_claims(key: &ServiceAccountKey, scope: &str) -> Result<Vec<u8>, FilterError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| FilterError::from(format!("gcp_adc: system clock before Unix epoch: {e}")))?
         .as_secs();
-    let claims = AssertionClaims {
+
+    serde_json::to_vec(&AssertionClaims {
         iss: &key.client_email,
         scope,
         aud: &key.token_url,
         iat: now,
         exp: now.saturating_add(ASSERTION_LIFETIME.as_secs()),
-    };
-    let signing_key = jsonwebtoken::EncodingKey::from_rsa_pem(key.private_key_pem.as_bytes())
-        .map_err(|e| FilterError::from(format!("gcp_adc: invalid private key in credentials file: {e}")))?;
-    jsonwebtoken::encode(
-        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
-        &claims,
-        &signing_key,
-    )
-    .map_err(|e| FilterError::from(format!("gcp_adc: failed to sign service-account assertion: {e}")))
+    })
+    .map_err(|e| FilterError::from(format!("gcp_adc: failed to encode service-account assertion: {e}")))
 }
 
-/// Validate and parse a token endpoint response.
-fn parse_token_response(status_code: u16, body: &[u8], context: &str) -> Result<(HeaderValue, Duration), FilterError> {
-    let status = http::StatusCode::from_u16(status_code).unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
+/// `RS256` signature of `signing_input` with the key file's private key.
+/// OpenSSL errors name the failing operation, never key material.
+fn rs256_signature(key: &ServiceAccountKey, signing_input: &[u8]) -> Result<Vec<u8>, FilterError> {
+    Signer::new(MessageDigest::sha256(), &key.private_key)
+        .and_then(|mut signer| {
+            signer.set_rsa_padding(Padding::PKCS1)?;
+            signer.sign_oneshot_to_vec(signing_input)
+        })
+        .map_err(|e| FilterError::from(format!("gcp_adc: failed to sign service-account assertion: {e}")))
+}
+
+/// Parse a token-endpoint response into a sensitive bearer header plus
+/// its lifetime. `context` names the endpoint in error messages; the
+/// response body is never included (it can carry credential material).
+fn parse_token_response(response: &SubResponse, context: &str) -> Result<(HeaderValue, Duration), FilterError> {
+    let status = http::StatusCode::from_u16(response.status).unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
     if !status.is_success() {
         return Err(FilterError::from(format!(
             "gcp_adc: {context} token endpoint returned HTTP status {status}"
         )));
     }
-    let token: TokenEndpointResponse = serde_json::from_slice(body)
-        .map_err(|e| FilterError::from(format!("gcp_adc: failed to parse {context} token response: {e}")))?;
+
+    // Serde type errors can echo credential-bearing scalar values from the body.
+    let token: TokenEndpointResponse = serde_json::from_slice(&response.body)
+        .map_err(|_parse_error| FilterError::from(format!("gcp_adc: failed to parse {context} token response")))?;
+
     let mut authorization = HeaderValue::from_str(&format!("Bearer {}", token.access_token))
         .map_err(|e| FilterError::from(format!("gcp_adc: {context} token is not a valid header value: {e}")))?;
     authorization.set_sensitive(true);
+
     Ok((authorization, Duration::from_secs(token.expires_in)))
 }
 
@@ -279,21 +406,26 @@ fn parse_token_response(status_code: u16, body: &[u8], context: &str) -> Result<
 // GoogleApplicationCredentials
 // -----------------------------------------------------------------------------
 
-/// Parse of a Google ADC JSON file.
-#[derive(Debug, Deserialize)]
+/// Discriminator parse of a Google ADC JSON file; the `service_account`
+/// branch additionally needs the three minting fields, which serde only
+/// deserializes on demand. No `Debug`: it carries the private key.
+#[derive(Deserialize)]
 struct GoogleApplicationCredentials {
     /// Google credential `type` field.
     #[serde(rename = "type")]
-    /// Google credential type discriminator.
     cred_type: String,
+
+    /// Service-account email (`iss`).
     #[serde(default)]
-    /// Optional service-account email.
     client_email: Option<String>,
+
+    /// PEM private key for assertion signing, wiped from memory once
+    /// parsed.
     #[serde(default)]
-    /// Optional PEM private key.
-    private_key: Option<String>,
+    private_key: Option<Zeroizing<String>>,
+
+    /// `OAuth2` token endpoint URL.
     #[serde(default)]
-    /// Optional `OAuth2` token URI.
     token_uri: Option<String>,
 }
 
@@ -310,7 +442,7 @@ struct GoogleApplicationCredentials {
 /// # Errors
 ///
 /// Returns [`FilterError`] if a configured file is missing, unreadable,
-/// or has an unsupported `type`.
+/// or has an unsupported or incomplete `type`.
 pub(super) fn resolve_token_source(
     config: &GcpAdcConfig,
     application_credentials: Option<&Path>,
@@ -336,16 +468,13 @@ pub(super) fn resolve_token_source(
 
 /// Read a Google ADC JSON file and map its `type` to a [`TokenSource`].
 fn parse_credential_file(path: &Path) -> Result<TokenSource, FilterError> {
-    let raw = std::fs::read_to_string(path).map_err(|error| {
-        FilterError::from(format!(
-            "gcp_adc: failed to read credentials file '{}': {error}",
-            path.display()
-        ))
-    })?;
+    let display = path.display();
+    let raw = Zeroizing::new(std::fs::read_to_string(path).map_err(|error| {
+        FilterError::from(format!("gcp_adc: failed to read credentials file '{display}': {error}"))
+    })?);
     let parsed: GoogleApplicationCredentials = serde_json::from_str(&raw).map_err(|error| {
         FilterError::from(format!(
-            "gcp_adc: failed to parse credentials file '{}': {error}",
-            path.display()
+            "gcp_adc: failed to parse credentials file '{display}': {error}"
         ))
     })?;
     match parsed.cred_type.as_str() {
@@ -362,46 +491,81 @@ fn parse_credential_file(path: &Path) -> Result<TokenSource, FilterError> {
     }
 }
 
-/// Validate service-account fields and construct a key-backed token source.
+/// Build a [`TokenSource::ServiceAccountKey`] from a parsed key file,
+/// requiring every field the minting flow needs so an incomplete file
+/// fails at config time rather than per request.
 fn service_account_source(parsed: GoogleApplicationCredentials) -> Result<TokenSource, FilterError> {
     let client_email = parsed
         .client_email
-        .filter(|value| !value.is_empty())
+        .filter(|email| !email.is_empty())
         .ok_or_else(|| FilterError::from("gcp_adc: credentials file is missing client_email"))?;
     super::config::validate_service_account(&client_email)?;
-    let private_key_pem = parsed
+    let private_key = parsed
         .private_key
-        .filter(|value| !value.is_empty())
+        .filter(|key| !key.is_empty())
         .ok_or_else(|| FilterError::from("gcp_adc: credentials file is missing private_key"))?;
     let token_uri = parsed
         .token_uri
-        .filter(|value| !value.is_empty())
+        .filter(|uri| !uri.is_empty())
         .ok_or_else(|| FilterError::from("gcp_adc: credentials file is missing token_uri"))?;
     let token_url = validate_token_uri(&token_uri)?;
     Ok(TokenSource::ServiceAccountKey(ServiceAccountKey {
         client_email,
-        private_key_pem,
-        loopback_test: token_url.starts_with("http://127.0.0.1"),
+        private_key: parse_private_key(&private_key)?,
         token_url,
     }))
 }
 
-/// Validate that a credential-file token URI targets the approved endpoint.
+/// Parse the key file's PEM private key once, at construct time, so a
+/// malformed or non-RSA key is a configuration error rather than a failure
+/// on every request. Google issues unencrypted PKCS#8; PKCS#1 loads too.
+fn parse_private_key(pem: &str) -> Result<PKey<Private>, FilterError> {
+    // Without a callback OpenSSL prompts on the controlling terminal for an
+    // encrypted key; refusing every passphrase makes it a load error instead.
+    let key = PKey::private_key_from_pem_callback(pem.as_bytes(), |_passphrase| Ok(0)).map_err(|e| {
+        FilterError::from(format!(
+            "gcp_adc: credentials file private_key is not an unencrypted PEM private key: {e}"
+        ))
+    })?;
+    if key.id() != Id::RSA {
+        return Err(FilterError::from(
+            "gcp_adc: credentials file private_key must be an RSA key (assertions are signed with RS256)",
+        ));
+    }
+    Ok(key)
+}
+
+/// Accept only Google's `OAuth2` token endpoint as a key file's
+/// `token_uri`, compared after URL normalization, so a tampered key file can
+/// never send the signed assertion anywhere else: any other scheme, host,
+/// port, path, userinfo, query, or fragment is invalid configuration.
+/// Unit-test builds additionally accept a plain `http` literal IPv4 loopback
+/// endpoint so the mint can run against an in-process mock.
+///
+/// Errors never echo the value: a malformed URL may carry credentials.
 fn validate_token_uri(raw: &str) -> Result<String, FilterError> {
     let parsed = url::Url::parse(raw)
-        .map_err(|e| FilterError::from(format!("gcp_adc: credentials file token_uri is invalid: {e}")))?;
-    if !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-    {
-        return Err("gcp_adc: credentials file token_uri must not contain credentials, query, or fragment".into());
+        .map_err(|e| FilterError::from(format!("gcp_adc: credentials file token_uri is not a valid URL: {e}")))?;
+    let is_allowed = parsed.as_str() == GOOGLE_TOKEN_URL;
+    #[cfg(test)]
+    let is_allowed = is_allowed || is_loopback_test_endpoint(&parsed);
+    if !is_allowed {
+        return Err(FilterError::from(format!(
+            "gcp_adc: credentials file token_uri must be '{GOOGLE_TOKEN_URL}'; no other token endpoint may \
+             receive the signed assertion"
+        )));
     }
-    let host = parsed.host_str().unwrap_or("");
-    let google = parsed.scheme() == "https" && host == GOOGLE_TOKEN_HOST && parsed.path() == "/token";
-    let loopback = cfg!(test) && parsed.scheme() == "http" && host == "127.0.0.1";
-    if !google && !loopback {
-        return Err("gcp_adc: credentials file token_uri must be https://oauth2.googleapis.com/token".into());
-    }
-    Ok(parsed.to_string())
+    Ok(parsed.into())
+}
+
+/// A plain `http` endpoint on literal `127.0.0.1` with no userinfo, query,
+/// or fragment: the in-process token endpoint mock of this crate's tests.
+#[cfg(test)]
+fn is_loopback_test_endpoint(url: &url::Url) -> bool {
+    url.scheme() == "http"
+        && url.host() == Some(url::Host::Ipv4(std::net::Ipv4Addr::LOCALHOST))
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
 }

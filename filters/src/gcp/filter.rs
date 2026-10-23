@@ -27,7 +27,8 @@ use super::{
 /// flight. Passed to [`TokenCache::new`] as its safety margin.
 const EXPIRY_SKEW: Duration = Duration::from_secs(30);
 
-/// Timeout for a single metadata-server round-trip.
+/// Timeout for a single token round-trip, to the metadata server or to
+/// Google's `OAuth2` token endpoint for `source: key_file`.
 const TOKEN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 // -----------------------------------------------------------------------------
@@ -46,22 +47,33 @@ const TOKEN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bearer <token>` on every proxied request, keeping GCP credentials
 /// invisible to the downstream client. There is no background refresh
 /// thread: caching is cache-through, the same as
-/// [`crate::azure::azure_ad`] — see
+/// [`crate::azure::azure_ad`]; see
 /// [`praxis_ai_apis::token_cache::TokenCache`] for the exact contract.
 ///
-/// For `source: key_file`, the filter mints tokens itself: it signs a
-/// `JWT` assertion with the key file's private key and exchanges it at
-/// Google's `OAuth2` token endpoint. The `token_uri` inside the key file
-/// is validated at construct time to `https://oauth2.googleapis.com`
-/// (or a loopback test fixture), so a tampered key file cannot redirect
-/// the signed assertion elsewhere. Key files missing `client_email`,
-/// `private_key`, or `token_uri` are rejected as configuration errors.
+/// For `source: key_file`, the filter mints tokens itself: it signs an
+/// `RS256` `JWT` assertion with the key file's private key through the
+/// system OpenSSL and exchanges it at Google's `OAuth2` token endpoint.
+/// The key file's `token_uri` must be exactly
+/// `https://oauth2.googleapis.com/token`, so a tampered key file cannot
+/// send the signed assertion anywhere else. The key file is fully parsed
+/// when the pipeline is built: a key file missing `client_email`, `private_key`,
+/// or `token_uri`, or whose `private_key` is not an unencrypted RSA key,
+/// is rejected as a configuration error. Reload the config to pick up a
+/// rotated key.
 ///
 /// Credential-source resolution happens at construct time:
 /// `GOOGLE_APPLICATION_CREDENTIALS` is read once when the pipeline is
 /// built (reload the config to pick up changes), and a `gcloud` user
 /// credential file (`authorized_user`) is rejected as a configuration
 /// error rather than silently falling through the ADC chain.
+///
+/// With `clusters` set, the token is injected only into requests whose
+/// selected cluster is listed, so a chain that routes to several providers
+/// never hands the GCP token to the others. The cluster is chosen by the
+/// routing filters, so `gcp_adc` must come after the `router` (or whichever
+/// filter selects the cluster) and after anything that can change that
+/// choice; placed earlier, no cluster is selected yet and it injects
+/// nothing.
 ///
 /// This filter only injects `Authorization`. Pointing the request at
 /// the correct Vertex endpoint (cluster `endpoints` + `tls.sni`) is
@@ -71,10 +83,11 @@ const TOKEN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// fetch fails — the request is rejected with `503` rather than
 /// forwarded unauthenticated.
 ///
-/// Metadata requests use a proxy-free, redirect-free client pinned to the
+/// Token requests use a proxy-free, redirect-free client pinned to the
 /// complete validated DNS result set. Metadata mode intentionally permits
-/// the protocol-owned private endpoint; arbitrary private hosts remain
-/// invalid configuration.
+/// the protocol-owned private endpoint, the key-file token endpoint must
+/// resolve to public addresses, and arbitrary private hosts remain invalid
+/// configuration.
 ///
 /// # YAML configuration
 ///
@@ -88,7 +101,7 @@ pub struct GcpAdcFilter {
     /// [`praxis_ai_apis::token_cache`].
     cache: TokenCache<HeaderValue>,
 
-    /// Shared sub-request client for metadata server callouts.
+    /// Shared sub-request client for metadata and token endpoint callouts.
     subrequest_client: SubRequestClient,
 
     /// Resolved credential source.
@@ -179,9 +192,21 @@ impl GcpAdcFilter {
     fn cluster_is_in_scope(&self, cluster: Option<&str>) -> bool {
         self.clusters.is_empty() || cluster.is_some_and(|selected| self.clusters.iter().any(|name| name == selected))
     }
+
+    /// Fetch a fresh token for this filter's credential source; the
+    /// [`TokenCache`] decides when this runs.
+    async fn fetch_token(&self) -> Result<(HeaderValue, Duration), FilterError> {
+        token::fetch_pinned(
+            &self.subrequest_client,
+            &self.source,
+            &self.metadata_host,
+            &self.scope,
+            TOKEN_REQUEST_TIMEOUT,
+        )
+        .await
+    }
 }
 
-#[expect(clippy::too_many_lines, reason = "credential fetch and fail-closed request boundary")]
 #[async_trait::async_trait]
 impl praxis_filter::HttpFilter for GcpAdcFilter {
     fn name(&self) -> &'static str {
@@ -204,18 +229,7 @@ impl praxis_filter::HttpFilter for GcpAdcFilter {
             return Ok(praxis_filter::FilterAction::Continue);
         }
 
-        let fetched = self
-            .cache
-            .get_or_refresh(|| {
-                token::fetch_pinned(
-                    &self.subrequest_client,
-                    &self.source,
-                    &self.metadata_host,
-                    &self.scope,
-                    TOKEN_REQUEST_TIMEOUT,
-                )
-            })
-            .await;
+        let fetched = self.cache.get_or_refresh(|| self.fetch_token()).await;
         match fetched {
             Ok(authorization) => {
                 if self.failing.swap(false, Ordering::Relaxed) {

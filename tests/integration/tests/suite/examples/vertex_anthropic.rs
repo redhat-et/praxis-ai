@@ -60,7 +60,7 @@ fn messages_request_is_stripped_upstream_and_response_model_restored() {
     let raw = http_send(
         proxy.addr(),
         &anthropic_request(
-            r#"{"model":"vertex/claude-sonnet-4-5","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}"#,
+            r#"{"model":"claude-sonnet-4-5","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}"#,
         ),
     );
     assert_eq!(parse_status(&raw), 200);
@@ -81,7 +81,7 @@ fn messages_request_is_stripped_upstream_and_response_model_restored() {
 
     let to_client = parse_body(&raw);
     assert!(
-        to_client.contains(r#""model":"vertex/claude-sonnet-4-5""#),
+        to_client.contains(r#""model":"claude-sonnet-4-5""#),
         "the user-facing model id must come back, got: {to_client}"
     );
     assert!(
@@ -101,7 +101,7 @@ fn stream_true_sends_stream_rawpredict_upstream() {
     let proxy = praxis_test_utils::start_proxy(&patched_example(proxy_port, backend.port()));
 
     let request = anthropic_request(
-        r#"{"model":"vertex/claude-sonnet-4-5","stream":true,"max_tokens":8,"messages":[{"role":"user","content":"hi"}]}"#,
+        r#"{"model":"claude-sonnet-4-5","stream":true,"max_tokens":8,"messages":[{"role":"user","content":"hi"}]}"#,
     );
     let raw = http_send(proxy.addr(), &request);
     assert_eq!(parse_status(&raw), 200);

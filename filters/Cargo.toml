@@ -18,7 +18,7 @@ default = ["standard"]
 standard = ["aws-sigv4-filter", "policy-engine"]
 # EnMaaS API-key authentication. Kept out of the lean standard graph because
 # its direct HTTP client is intentionally excluded from minimal builds.
-api-key-auth-filter = ["dep:reqwest"]
+api-key-auth-filter = ["dep:reqwest", "dep:sha2"]
 # The `policy` filter from Praxis core. Kept explicit so no-default FIPS builds
 # can omit the policy engine and its pure-Rust cryptography.
 policy-engine = ["praxis-filter/policy-engine"]
@@ -30,7 +30,9 @@ aws-sigv4-filter = ["dep:aws-credential-types"]
 # non-experimental filter.
 apis = ["full"]
 # Opt-in OpenAI filter groups; see praxis-ai-apis for what each one contains.
-openai-responses = ["praxis-ai-apis/openai-responses"]
+openai-responses = ["experimental", "praxis-ai-apis/openai-responses"]
+# Experimental ephemeral agent orchestration; separate from Responses support.
+openai-agentic-loop = ["openai-responses", "experimental", "praxis-ai-apis/openai-agentic-loop"]
 openai-file-resolve-filter = ["openai-responses", "praxis-ai-apis/openai-file-resolve-filter"]
 store = ["openai-responses", "praxis-ai-apis/store"]
 store-postgres = ["store", "praxis-ai-apis/store-postgres"]
@@ -40,10 +42,22 @@ store-all = ["store-postgres", "store-sqlite"]
 openai-conversations = ["store", "praxis-ai-apis/openai-conversations"]
 openai-compact = ["store", "praxis-ai-apis/openai-compact"]
 openai-mcp-tools = ["store", "praxis-ai-apis/openai-mcp-tools"]
-# Every OpenAI group, without choosing a store backend.
-openai-all = ["openai-file-resolve-filter", "openai-conversations", "openai-compact", "openai-mcp-tools"]
-# Every non-experimental filter; equals the pre-feature-split capability.
-full = ["standard", "api-key-auth-filter", "openai-all", "store-postgres"]
+# Every OpenAI group, including experimental capabilities, without a backend.
+openai-all = ["openai-agentic-loop", "openai-file-resolve-filter", "openai-conversations", "openai-compact", "openai-mcp-tools"]
+# Every non-experimental filter. Experimental OpenAI groups stay opt-in.
+full = ["standard", "api-key-auth-filter"]
+# EnMaaS deployment profile: the deployed image keeps the historical filter
+# surface, including the OpenAI response groups and the Postgres store backend.
+enmaas = [
+    "standard",
+    "api-key-auth-filter",
+    "openai-agentic-loop",
+    "openai-file-resolve-filter",
+    "openai-conversations",
+    "openai-compact",
+    "openai-mcp-tools",
+    "store-postgres",
+]
 # Experimental: the generic http_callout filter. Work in progress; the config
 # surface may change. Activates the `experimental` marker.
 http-callout-filter = ["experimental", "dep:serde_json_path"]
@@ -52,10 +66,12 @@ http-callout-filter = ["experimental", "dep:serde_json_path"]
 azure-ad-filter = ["experimental"]
 # Experimental: the gcp_adc (Application Default Credentials) upstream
 # authentication filter. Work in progress; the config surface may change.
-# Activates the `experimental` marker. `jsonwebtoken` signs the service-
-# account `JWT` assertion for `source: key_file`. `reqwest` stays
-# unconditional because the EnMaaS `api_key_auth` filter also uses it.
-gcp-adc-filter = ["experimental", "dep:jsonwebtoken"]
+# Activates the `experimental` marker. `openssl` signs the service-account
+# `JWT` assertion for `source: key_file` in the system library.
+gcp-adc-filter = ["experimental", "dep:openssl"]
+# Experimental: Anthropic Messages to Vertex AI rawPredict translation. Work
+# in progress; the config surface may change. Activates the experimental marker.
+vertex-anthropic-filter = ["experimental", "praxis-ai-apis/vertex-anthropic"]
 # Experimental: the token_rate_limit filter. Its parent proposal
 # (00121_token-rate-limiting in praxis-proxy/enhancements) is not yet
 # `accepted`, and open design questions remain (bucket-keying strategy,
@@ -70,9 +86,14 @@ token-rate-limit-filter = ["experimental", "dep:redis", "dep:thiserror"]
 # from token-rate-limit-filter because static request admission must fail
 # closed independently of quota-backend health.
 token-ceiling-filter = ["experimental", "dep:tiktoken-rs"]
+# Experimental: the inflight_tracker filter. Nothing reads InFlightRegistry's
+# counters yet (no scorer, no HTTP surface), and the registry's eventual
+# backing store is still an open question, so the filter itself stays gated
+# until both land. Activates the `experimental` marker.
+inflight-tracker-filter = ["experimental"]
 # Marker feature activated transitively by any experimental feature, mirroring
 # praxis core's server crate. Lets consumers gate on "anything experimental".
-experimental = []
+experimental = ["praxis-ai-apis/experimental"]
 opentelemetry = []
 praxis-main = ["praxis-ai-apis/praxis-main"]
 
@@ -90,6 +111,7 @@ dashmap = { workspace = true }
 http = { workspace = true }
 metrics = { workspace = true }
 notify = { workspace = true }
+openssl = { workspace = true, optional = true }
 percent-encoding = { workspace = true }
 praxis-ai-apis = { workspace = true }
 praxis-core = { workspace = true }
@@ -100,13 +122,12 @@ praxis-tls = { workspace = true }
 redis = { workspace = true, optional = true }
 rand = { workspace = true }
 reqwest = { workspace = true, optional = true }
-jsonwebtoken = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_json_canonicalizer = { workspace = true }
 serde_json_path = { workspace = true, optional = true }
 serde_yaml = { workspace = true }
-sha2 = { workspace = true }
+sha2 = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
 tiktoken-rs = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt", "sync", "time", "net"] }
@@ -119,8 +140,12 @@ zeroize = { workspace = true, features = ["serde"] }
 # The SigV4 reference implementation the OpenSSL-backed signer is checked
 # against (filters/src/aws/signing.rs); never linked into the binary.
 aws-sigv4 = { workspace = true }
+rcgen = { workspace = true }
 metrics-util = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio-rustls = { workspace = true }
 tracing-subscriber = { workspace = true }
 wiremock = { workspace = true }

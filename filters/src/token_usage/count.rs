@@ -120,6 +120,13 @@ const META_SSE_SKIP: &str = "token_count.sse_skip";
 /// to mark overflow when the terminal usage event itself was dropped.
 const META_SSE_DROPPED_TAIL: &str = "token_count.sse_dropped_tail";
 
+/// Metadata key for the last SSE delta timestamp (unix nanos), used to
+/// measure inter-delta decode time (TPOT).
+const META_TPOT_LAST: &str = "token_count.tpot_last_nanos";
+
+/// Metadata key guarding single-fire finish-reason recording.
+const META_FINISH_RECORDED: &str = "token_count.finish_reason_recorded";
+
 /// Bedrock `InvokeModel` response header carrying the input token count.
 const HEADER_BEDROCK_INPUT: &str = "x-amzn-bedrock-input-token-count";
 
@@ -285,6 +292,16 @@ impl ProviderKind {
 /// for routes that serve several API formats behind one base URL. Paths with
 /// no usage format (health checks, `/v1/models`, `count_tokens`) are skipped.
 ///
+/// # Metrics
+///
+/// Emits model/cluster-labeled `praxis_ai_*` metrics: prompt, output,
+/// reasoning, and cache-read token counts; empty completions; and, for
+/// streaming responses, TPOT samples and one normalized finish reason per
+/// response. The `model` label comes from `model_to_header` metadata (not a
+/// raw client header), and finish reasons are mapped to a bounded set
+/// (`stop`, `length`, `tool_calls`, `content_filter`, `stop_sequence`,
+/// `refusal`, `other`).
+///
 /// # YAML
 ///
 /// ```yaml
@@ -373,6 +390,11 @@ impl HttpFilter for TokenCountFilter {
     /// other providers, detects the content-type to select the body
     /// extraction strategy used by `on_response_body`.
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        // A retry can reuse the request context; never let TPOT or finish-reason
+        // state from the previous response leak into this one.
+        ctx.filter_metadata.remove(META_TPOT_LAST);
+        ctx.filter_metadata.remove(META_FINISH_RECORDED);
+
         let is_success = ctx.response_header.as_ref().is_some_and(|r| r.status.is_success());
 
         if !is_success {
@@ -500,6 +522,7 @@ fn extract_bedrock_headers(ctx: &mut HttpFilterContext<'_>) {
     };
 
     set_token_usage(ctx, input, output, None);
+    crate::llm_metrics::record_token_usage(ctx, input, output, None, None);
     debug!(
         input,
         output, "extracted Bedrock InvokeModel token counts from response headers"
@@ -564,6 +587,8 @@ fn handle_json_body(
 /// breakdown, and reasoning tokens. Called once at end-of-stream with the fully
 /// buffered body; a body carrying no recognizable usage records nothing.
 fn record_json_usage(ctx: &mut HttpFilterContext<'_>, provider: ProviderKind, data: &[u8]) {
+    record_finish_reason_once(ctx, data, provider);
+
     let Some(usage) = provider.extract_token_usage(data) else {
         return;
     };
@@ -590,6 +615,13 @@ fn publish_token_usage(ctx: &mut HttpFilterContext<'_>, usage: TokenUsage) {
     );
     set_cache_token_usage(ctx, usage.cache_read_tokens(), usage.cache_write_tokens());
     set_reasoning_token_usage(ctx, usage.reasoning_tokens());
+    crate::llm_metrics::record_token_usage(
+        ctx,
+        usage.input_tokens(),
+        usage.output_tokens(),
+        usage.cache_read_tokens(),
+        usage.reasoning_tokens(),
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -646,11 +678,51 @@ fn process_sse_payload(ctx: &mut HttpFilterContext<'_>, payload: &[u8], provider
         return;
     }
 
+    record_tpot_delta(ctx);
+    record_finish_reason_once(ctx, payload, provider);
+
     if try_complete_usage(ctx, payload, provider) {
         return;
     }
 
     try_partial_usage(ctx, payload, provider);
+}
+
+/// Record the elapsed time since the previous SSE delta as a TPOT sample.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "nanosecond duration is recorded as seconds f64"
+)]
+fn record_tpot_delta(ctx: &mut HttpFilterContext<'_>) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+
+    if let Some(last) = ctx
+        .filter_metadata
+        .get(META_TPOT_LAST)
+        .and_then(|v| v.parse::<u128>().ok())
+    {
+        let delta_seconds = now.saturating_sub(last) as f64 / 1_000_000_000.0;
+        crate::llm_metrics::record_tpot(ctx, delta_seconds);
+    }
+
+    ctx.filter_metadata.insert(META_TPOT_LAST.to_owned(), now.to_string());
+}
+
+/// Record the first finish reason observed on this response.
+fn record_finish_reason_once(ctx: &mut HttpFilterContext<'_>, payload: &[u8], provider: ProviderKind) {
+    if ctx.filter_metadata.contains_key(META_FINISH_RECORDED) {
+        return;
+    }
+    let Some(reason) = extract_finish_reason(payload, provider) else {
+        return;
+    };
+    let reason = normalize_finish_reason(&reason);
+    crate::llm_metrics::record_finish_reason(ctx, reason);
+    ctx.filter_metadata
+        .insert(META_FINISH_RECORDED.to_owned(), reason.to_owned());
 }
 
 /// Try complete usage extraction (OpenAI, Google, Azure final events).
@@ -682,6 +754,104 @@ fn try_complete_usage(ctx: &mut HttpFilterContext<'_>, payload: &[u8], provider:
         "complete token usage found in SSE event"
     );
     true
+}
+
+/// Extract the provider-specific terminal reason from a JSON payload.
+fn extract_finish_reason(payload: &[u8], provider: ProviderKind) -> Option<String> {
+    let needle: &[u8] = match provider {
+        ProviderKind::OpenAi | ProviderKind::Azure => b"\"finish_reason\"",
+        ProviderKind::Anthropic => b"\"stop_reason\"",
+        ProviderKind::Google => b"\"finishReason\"",
+        ProviderKind::Bedrock => b"\"stopReason\"",
+        ProviderKind::BedrockInvokeModel | ProviderKind::Auto => return None,
+    };
+    extract_json_string_after(payload, needle)
+}
+
+/// Extract a quoted JSON string value immediately following `needle`.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "bounded slicing over a byte buffer after explicit length checks"
+)]
+fn extract_json_string_after(payload: &[u8], needle: &[u8]) -> Option<String> {
+    let start = find_subslice(payload, needle)?;
+    let mut rest = &payload[start + needle.len()..];
+    rest = skip_json_separator(rest)?;
+    if rest.first() != Some(&b'"') {
+        return None;
+    }
+    rest = &rest[1..];
+    let end = rest.iter().position(|&b| b == b'"')?;
+    let value = std::str::from_utf8(&rest[..end]).ok()?;
+    if value.is_empty() {
+        return None;
+    }
+    Some(value.to_owned())
+}
+
+/// Skip ASCII whitespace and a single `:` before a JSON value.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "bounded slicing over a byte buffer after explicit length checks"
+)]
+fn skip_json_separator(mut rest: &[u8]) -> Option<&[u8]> {
+    while let Some(&first) = rest.first() {
+        if !first.is_ascii_whitespace() {
+            break;
+        }
+        rest = &rest[1..];
+    }
+    if rest.first() != Some(&b':') {
+        return None;
+    }
+    rest = &rest[1..];
+    while let Some(&first) = rest.first() {
+        if !first.is_ascii_whitespace() {
+            break;
+        }
+        rest = &rest[1..];
+    }
+    Some(rest)
+}
+
+/// Locate `needle` in `haystack`, returning the byte index of the match.
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|window| window == needle)
+}
+
+/// Map provider-native terminal reasons onto the bounded metric label set.
+fn normalize_finish_reason(reason: &str) -> &'static str {
+    if reason.eq_ignore_ascii_case("stop") || reason.eq_ignore_ascii_case("end_turn") {
+        "stop"
+    } else if reason.eq_ignore_ascii_case("length")
+        || reason.eq_ignore_ascii_case("max_tokens")
+        || reason.eq_ignore_ascii_case("MAX_TOKENS")
+    {
+        "length"
+    } else if reason.eq_ignore_ascii_case("tool_calls")
+        || reason.eq_ignore_ascii_case("function_call")
+        || reason.eq_ignore_ascii_case("tool_use")
+    {
+        "tool_calls"
+    } else if reason.eq_ignore_ascii_case("content_filter")
+        || reason.eq_ignore_ascii_case("content_filtered")
+        || reason.eq_ignore_ascii_case("SAFETY")
+        || reason.eq_ignore_ascii_case("BLOCKLIST")
+        || reason.eq_ignore_ascii_case("PROHIBITED_CONTENT")
+        || reason.eq_ignore_ascii_case("SPII")
+        || reason.eq_ignore_ascii_case("guardrail_intervened")
+    {
+        "content_filter"
+    } else if reason.eq_ignore_ascii_case("stop_sequence") {
+        "stop_sequence"
+    } else if reason.eq_ignore_ascii_case("refusal") {
+        "refusal"
+    } else {
+        "other"
+    }
 }
 
 /// Stores one optional streaming accumulator; skips omitted counts.
