@@ -271,6 +271,21 @@ impl ExternalMeteringFilter {
         })
     }
 
+    /// Snapshot the flags that govern how a balance response is interpreted.
+    fn policy(&self) -> BalancePolicy {
+        let model_policy = if !self.model_policy_check {
+            ModelPolicyMode::Disabled
+        } else if self.model_policy_fail_open {
+            ModelPolicyMode::FailOpen
+        } else {
+            ModelPolicyMode::FailClosed
+        };
+        BalancePolicy {
+            fail_open: self.fail_open,
+            model_policy,
+        }
+    }
+
     /// Ask the metering service whether the tenant may spend more tokens.
     ///
     /// The metering service expresses denial only through a `2xx` response
@@ -298,7 +313,7 @@ impl ExternalMeteringFilter {
         .await;
 
         match result {
-            Ok(resp) if is_success(resp.status) => parse_balance_result(&resp.body, self.fail_open),
+            Ok(resp) if is_success(resp.status) => parse_balance_result(&resp.body, self.policy()),
             Ok(resp) => {
                 warn!(status = resp.status, "balance check returned a non-2xx status");
                 self.on_metering_unavailable()
@@ -311,11 +326,13 @@ impl ExternalMeteringFilter {
     }
 
     /// Resolve the action to take when the balance check cannot be completed.
+    ///
+    /// `fail_open` is the only availability policy. Timeouts, connection
+    /// failures, non-2xx responses, and unreadable bodies mean no entitlement
+    /// or policy decision was reached. The model-policy flag is scoped to a
+    /// readable response that omits the policy verdict; it must not turn a
+    /// metering outage into a blanket 403.
     fn on_metering_unavailable(&self) -> FilterAction {
-        if self.model_policy_check && !self.model_policy_fail_open {
-            debug!("rejecting request because model policy is unavailable");
-            return reject_model_not_allowed();
-        }
         if self.fail_open {
             trace!("admitting request (fail-open)");
             FilterAction::Continue
@@ -784,10 +801,34 @@ fn strip_client_credentials(ctx: &mut HttpFilterContext<'_>) {
 // Balance Check
 // -----------------------------------------------------------------------------
 
+/// How model-policy enforcement treats a readable response without a verdict.
+#[derive(Clone, Copy)]
+enum ModelPolicyMode {
+    /// Model-policy enforcement is disabled.
+    Disabled,
+    /// A missing verdict is allowed.
+    FailOpen,
+    /// A missing verdict rejects the request.
+    FailClosed,
+}
+
+/// Policy flags that govern how a balance response is interpreted.
+#[derive(Clone, Copy)]
+struct BalancePolicy {
+    /// Availability behavior when the response cannot be decoded.
+    fail_open: bool,
+    /// Behavior when a readable response omits `modelAllowed`.
+    model_policy: ModelPolicyMode,
+}
+
 /// Interpret a balance check response body.
-fn parse_balance_result(body: &[u8], fail_open: bool) -> FilterAction {
+///
+/// `fail_open` applies when the response cannot be decoded. When the response
+/// is readable but omits `modelAllowed`, `model_policy_fail_open` decides
+/// whether an otherwise-admitted request may proceed without a policy verdict.
+fn parse_balance_result(body: &[u8], policy: BalancePolicy) -> FilterAction {
     let Some(balance) = decode_balance(body) else {
-        return admit_or_reject(fail_open);
+        return admit_or_reject(policy.fail_open);
     };
 
     if balance.model_allowed == Some(false) {
@@ -795,6 +836,10 @@ fn parse_balance_result(body: &[u8], fail_open: bool) -> FilterAction {
     }
 
     if balance.has_access {
+        if matches!(policy.model_policy, ModelPolicyMode::FailClosed) && balance.model_allowed.is_none() {
+            warn!("balance response omitted model policy verdict");
+            return reject_model_policy_unavailable();
+        }
         trace!("balance check passed");
         FilterAction::Continue
     } else {
@@ -848,6 +893,14 @@ fn admit_or_reject(fail_open: bool) -> FilterAction {
 fn reject_unavailable() -> FilterAction {
     FilterAction::Reject(
         Rejection::status(STATUS_METERING_UNAVAILABLE).with_body(Bytes::from_static(b"metering system unavailable")),
+    )
+}
+
+/// Reject with a 503 because a reachable metering response did not carry the
+/// model-policy verdict required by `model_policy_fail_open: false`.
+fn reject_model_policy_unavailable() -> FilterAction {
+    FilterAction::Reject(
+        Rejection::status(STATUS_METERING_UNAVAILABLE).with_body(Bytes::from_static(b"model policy unavailable")),
     )
 }
 

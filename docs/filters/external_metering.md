@@ -19,13 +19,14 @@ Tenant identity is resolved from the highest-trust source available: verified `{
 | `feature_key` | string | no | Entitlement feature key used in balance check URL path. |
 | `source` | string | no | `CloudEvents` `source` field value. |
 | `provider` | string | no | Static provider name attributed to emitted `CloudEvents`. |
-| `fail_open` | bool | no | When `true` (default), requests proceed if the metering service is unavailable. When `false`, requests are rejected with 503. |
+| `fail_open` | bool | no | When `true` (default), requests proceed if the metering service is unavailable (timeout, connection failure, non-2xx, or unreadable response). When `false`, those requests are rejected with 503. Explicit policy and quota denials are not affected. |
 | `identity_header_prefix` | string | no | Prefix for tenant identity headers to capture and strip. Expected headers: `{prefix}username`, `{prefix}group`, `{prefix}subscription`, `{prefix}model`. |
 | `identity_metadata_namespace` | string | no | Metadata namespace the `identity_header_guard` filter writes captured identity headers under. Must match that filter's `metadata_namespace` setting when both run in one pipeline. |
 | `internal_auth_file` | string | no | Optional file containing the bearer token used to authenticate gateway-to-metering subrequests. The file is read at pipeline build time and the token is never logged or put in the request body. |
 | `default_username` | string | no | Fallback username when no identity header is present. If set, requests without `{prefix}username` are still metered under this name. If unset, metering is skipped entirely. |
 | `default_model` | string | no | Fallback model name when no identity model header is present. |
 | `model_policy_check` | bool | no | Buffer the request body before the entitlement check so the public model ID can be included in the preflight. Enable when the metering service enforces per-user model allowlists. |
+| `model_policy_fail_open` | bool | no | Whether a readable metering response that omits `modelAllowed` may proceed without a model-policy verdict. This does not control service availability: timeouts, connection failures, non-2xx responses, and unreadable bodies are always governed by `fail_open`. |
 
 ## Example
 
@@ -43,4 +44,5 @@ internal_auth_file: "/etc/praxis-secrets/metering-token"
 default_username: "anonymous"
 default_model: "unknown"
 model_policy_check: false
+model_policy_fail_open: true
 ```
