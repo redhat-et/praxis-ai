@@ -74,8 +74,10 @@ pub(super) struct ExternalMeteringConfig {
     #[serde(default)]
     pub provider: Option<String>,
 
-    /// When `true` (default), requests proceed if the metering service
-    /// is unavailable. When `false`, requests are rejected with 503.
+    /// When `true` (default), requests proceed if the metering service is
+    /// unavailable (timeout, connection failure, non-2xx, or unreadable
+    /// response). When `false`, those requests are rejected with 503.
+    /// Explicit policy and quota denials are not affected.
     #[serde(default = "default_true")]
     pub fail_open: bool,
 
@@ -113,9 +115,10 @@ pub(super) struct ExternalMeteringConfig {
     #[serde(default)]
     pub model_policy_check: bool,
 
-    /// Whether an unavailable metering service may bypass the model-policy
-    /// decision. This is independent from `fail_open`, which controls the
-    /// ordinary entitlement/budget check.
+    /// Whether a readable metering response that omits `modelAllowed` may
+    /// proceed without a model-policy verdict. This does not control service
+    /// availability: timeouts, connection failures, non-2xx responses, and
+    /// unreadable bodies are always governed by `fail_open`.
     #[serde(default = "default_true")]
     pub model_policy_fail_open: bool,
 }

@@ -62,14 +62,52 @@ fn model_policy_fail_closed_requires_model_policy_check() {
 }
 
 #[tokio::test]
-async fn unavailable_model_policy_can_fail_closed_independently() {
+async fn unavailable_metering_honors_fail_open_even_when_model_policy_is_fail_closed() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
-        "metering_url: http://127.0.0.1:1\nallow_private_endpoint: true\nmodel_policy_check: true\nmodel_policy_fail_open: false\n",
+        "metering_url: http://127.0.0.1:1\nallow_private_endpoint: true\nfail_open: true\nmodel_policy_check: true\nmodel_policy_fail_open: false\n",
     )
     .unwrap();
     let filter = build_filter(&yaml).unwrap();
     let action = filter.check_balance(&state_for("alice", "gpt-4")).await;
-    assert!(matches!(action, FilterAction::Reject(rejection) if rejection.status == 403));
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "metering availability must follow fail_open, not model_policy_fail_open"
+    );
+}
+
+#[tokio::test]
+async fn unavailable_metering_rejects_when_fail_open_is_disabled() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "metering_url: http://127.0.0.1:1\nallow_private_endpoint: true\nfail_open: false\nmodel_policy_check: true\nmodel_policy_fail_open: false\n",
+    )
+    .unwrap();
+    let filter = build_filter(&yaml).unwrap();
+    let action = filter.check_balance(&state_for("alice", "gpt-4")).await;
+    assert!(matches!(action, FilterAction::Reject(rejection) if rejection.status == 503));
+}
+
+#[tokio::test]
+async fn non_success_balance_response_uses_fail_open_not_model_policy() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+
+    let base = format!(
+        "metering_url: {}\nallow_private_endpoint: true\nmodel_policy_check: true\nmodel_policy_fail_open: false\n",
+        server.uri()
+    );
+    let fail_open = filter_from_yaml(&format!("{base}fail_open: true\n"));
+    let action = fail_open.check_balance(&state_for("alice", "gpt-4")).await;
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "non-2xx responses must follow fail_open, not model_policy_fail_open"
+    );
+
+    let fail_closed = filter_from_yaml(&format!("{base}fail_open: false\n"));
+    let action = fail_closed.check_balance(&state_for("alice", "gpt-4")).await;
+    assert!(matches!(action, FilterAction::Reject(rejection) if rejection.status == 503));
 }
 
 #[test]
@@ -550,24 +588,41 @@ unknown_field: true
 // Balance Response Parsing
 // -----------------------------------------------------------------------------
 
+const NO_POLICY_CHECK: BalancePolicy = BalancePolicy {
+    fail_open: true,
+    model_policy: ModelPolicyMode::Disabled,
+};
+const POLICY_FAIL_OPEN: BalancePolicy = BalancePolicy {
+    fail_open: true,
+    model_policy: ModelPolicyMode::FailOpen,
+};
+const POLICY_FAIL_CLOSED: BalancePolicy = BalancePolicy {
+    fail_open: true,
+    model_policy: ModelPolicyMode::FailClosed,
+};
+const UNAVAILABLE_FAIL_CLOSED: BalancePolicy = BalancePolicy {
+    fail_open: false,
+    model_policy: ModelPolicyMode::FailClosed,
+};
+
 #[test]
 fn balance_response_has_access_continues() {
     let body = br#"{"hasAccess": true, "balance": 9000.0, "usage": 1000.0}"#;
-    let action = parse_balance_result(body, true);
+    let action = parse_balance_result(body, NO_POLICY_CHECK);
     assert!(matches!(action, FilterAction::Continue));
 }
 
 #[test]
 fn balance_response_no_access_rejects() {
     let body = br#"{"hasAccess": false, "balance": 0.0, "usage": 10000.0}"#;
-    let action = parse_balance_result(body, true);
+    let action = parse_balance_result(body, NO_POLICY_CHECK);
     assert!(matches!(action, FilterAction::Reject(_)));
 }
 
 #[test]
 fn model_allowlist_denial_is_forbidden_not_quota_exhausted() {
     let body = br#"{"hasAccess": false, "modelAllowed": false}"#;
-    let rejection = match parse_balance_result(body, true) {
+    let rejection = match parse_balance_result(body, POLICY_FAIL_CLOSED) {
         FilterAction::Reject(rejection) => Some(rejection),
         _ => None,
     }
@@ -578,27 +633,60 @@ fn model_allowlist_denial_is_forbidden_not_quota_exhausted() {
 #[test]
 fn balance_response_invalid_json_fail_open() {
     let body = b"not json";
-    let action = parse_balance_result(body, true);
+    let action = parse_balance_result(body, POLICY_FAIL_CLOSED);
     assert!(matches!(action, FilterAction::Continue));
 }
 
 #[test]
 fn balance_response_invalid_json_fail_closed() {
     let body = b"not json";
-    let action = parse_balance_result(body, false);
+    let action = parse_balance_result(body, UNAVAILABLE_FAIL_CLOSED);
     assert!(matches!(action, FilterAction::Reject(_)));
 }
 
 #[test]
 fn balance_response_empty_body_fail_open() {
-    let action = parse_balance_result(b"", true);
+    let action = parse_balance_result(b"", POLICY_FAIL_CLOSED);
     assert!(matches!(action, FilterAction::Continue));
 }
 
 #[test]
 fn balance_response_empty_body_fail_closed() {
-    let action = parse_balance_result(b"", false);
+    let action = parse_balance_result(b"", UNAVAILABLE_FAIL_CLOSED);
     assert!(matches!(action, FilterAction::Reject(_)));
+}
+
+#[test]
+fn balance_response_missing_model_verdict_fails_closed() {
+    let body = br#"{"hasAccess": true}"#;
+    let rejection = match parse_balance_result(body, POLICY_FAIL_CLOSED) {
+        FilterAction::Reject(rejection) => Some(rejection),
+        _ => None,
+    }
+    .expect("a missing model verdict must reject when policy is fail-closed");
+    assert_eq!(rejection.status, http::StatusCode::SERVICE_UNAVAILABLE.as_u16());
+    assert_eq!(
+        std::str::from_utf8(rejection.body.as_deref().unwrap()).unwrap(),
+        "model policy unavailable"
+    );
+}
+
+#[test]
+fn balance_response_missing_model_verdict_fails_open() {
+    let body = br#"{"hasAccess": true}"#;
+    let action = parse_balance_result(body, POLICY_FAIL_OPEN);
+    assert!(matches!(action, FilterAction::Continue));
+}
+
+#[test]
+fn balance_response_quota_denial_wins_over_missing_model_verdict() {
+    let body = br#"{"hasAccess": false}"#;
+    let rejection = match parse_balance_result(body, POLICY_FAIL_CLOSED) {
+        FilterAction::Reject(rejection) => Some(rejection),
+        _ => None,
+    }
+    .expect("a quota denial must still reject");
+    assert_eq!(rejection.status, http::StatusCode::TOO_MANY_REQUESTS.as_u16());
 }
 
 // -----------------------------------------------------------------------------
