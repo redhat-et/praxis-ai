@@ -10,6 +10,16 @@ use praxis_filter::{HttpFilter as _, Response};
 
 use super::*;
 
+macro_rules! activate_ttft {
+    ($filter:expr, $ctx:expr) => {
+        let mut resp = make_response_with_content_type("text/event-stream");
+        $ctx.response_header = Some(&mut resp);
+        drop($filter.on_response($ctx).await.unwrap());
+        $ctx.response_header = None;
+    };
+}
+
+
 // -----------------------------------------------------------------------------
 // on_response: Activation
 // -----------------------------------------------------------------------------
@@ -26,7 +36,7 @@ async fn on_response_activates_for_sse() {
     ctx.response_header = None;
 
     assert!(
-        ctx.filter_metadata.contains_key(META_ACTIVE),
+        ctx.extensions.get::<TtftState>().is_some(),
         "SSE content-type should activate TTFT tracking"
     );
 }
@@ -43,7 +53,7 @@ async fn on_response_activates_for_sse_with_charset() {
     ctx.response_header = None;
 
     assert!(
-        ctx.filter_metadata.contains_key(META_ACTIVE),
+        ctx.extensions.get::<TtftState>().is_some(),
         "SSE with charset should still activate"
     );
 }
@@ -60,7 +70,7 @@ async fn on_response_skips_non_sse() {
     ctx.response_header = None;
 
     assert!(
-        !ctx.filter_metadata.contains_key(META_ACTIVE),
+        ctx.extensions.get::<TtftState>().is_none(),
         "JSON content-type should not activate TTFT tracking"
     );
 }
@@ -78,7 +88,7 @@ async fn on_response_skips_non_success() {
     ctx.response_header = None;
 
     assert!(
-        !ctx.filter_metadata.contains_key(META_ACTIVE),
+        ctx.extensions.get::<TtftState>().is_none(),
         "non-success status should not activate TTFT tracking"
     );
 }
@@ -95,7 +105,7 @@ async fn on_response_skips_missing_content_type() {
     ctx.response_header = None;
 
     assert!(
-        !ctx.filter_metadata.contains_key(META_ACTIVE),
+        ctx.extensions.get::<TtftState>().is_none(),
         "missing content-type should not activate"
     );
 }
@@ -105,100 +115,164 @@ async fn on_response_skips_missing_content_type() {
 // -----------------------------------------------------------------------------
 
 #[tokio::test]
-async fn first_non_empty_chunk_records_and_deactivates() {
+async fn role_and_metadata_events_do_not_trigger_ttft() {
     let filter = TimeToFirstTokenFilter;
-    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
     let mut ctx = crate::test_utils::make_filter_context(&req);
+    activate_ttft!(&filter, &mut ctx);
 
-    let mut resp = make_response_with_content_type("text/event-stream");
-    ctx.response_header = Some(&mut resp);
-    drop(filter.on_response(&mut ctx).await.unwrap());
-    ctx.response_header = None;
-
-    assert!(ctx.filter_metadata.contains_key(META_ACTIVE));
-
-    let snapshotter = record_body_with_metrics(&filter, &mut ctx, b"data: {}\n\n");
-
-    assert!(
-        !ctx.filter_metadata.contains_key(META_ACTIVE),
-        "TTFT metadata should be removed after recording"
+    let snapshotter = record_chunks(
+        &filter,
+        &mut ctx,
+        &[
+            br#"data: {"choices":[{"delta":{"role":"assistant"}}]}"#.as_slice(),
+            br#"data: {"type":"response.created"}"#.as_slice(),
+        ],
+        false,
     );
 
+    assert!(ctx.extensions.get::<TtftState>().is_some());
+    assert!(
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .iter()
+            .all(|(key, ..)| key.key().name() != METRIC_TTFT_SECONDS),
+        "role and metadata events must not trigger TTFT"
+    );
+}
+
+#[tokio::test]
+async fn first_output_delta_records_once_and_deactivates() {
+    let filter = TimeToFirstTokenFilter;
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.set_metadata("openai_chat_completions_request.model", "gpt-4o");
+    activate_ttft!(&filter, &mut ctx);
+
+    let snapshotter = record_chunks(
+        &filter,
+        &mut ctx,
+        &[
+            concat!(r#"data: {"choices":[{"delta":{"role":"assistant"}}]}"#, "\n\n").as_bytes(),
+            concat!(r#"data: {"choices":[{"delta":{"content":"Hi"}}]}"#, "\n\n").as_bytes(),
+            concat!(r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#, "\n\n").as_bytes(),
+        ],
+        true,
+    );
+
+    assert!(ctx.extensions.get::<TtftState>().is_none());
     let (model, samples) = assert_single_ttft_histogram(&snapshotter);
-    assert_eq!(model, "unknown", "model should fall back to unknown");
-    assert_eq!(samples.len(), 1, "histogram should have exactly one sample");
-    assert!(samples[0] > 0.0, "TTFT should be positive");
+    assert_eq!(model, "gpt-4o");
+    assert_eq!(samples.len(), 1);
 }
 
 #[tokio::test]
-async fn first_non_empty_chunk_records_with_model_label() {
+async fn comments_are_ignored() {
     let filter = TimeToFirstTokenFilter;
-    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
     let mut ctx = crate::test_utils::make_filter_context(&req);
+    activate_ttft!(&filter, &mut ctx);
 
-    ctx.set_metadata("openai_responses_request.model", "gpt-4o");
-
-    let mut resp = make_response_with_content_type("text/event-stream");
-    ctx.response_header = Some(&mut resp);
-    drop(filter.on_response(&mut ctx).await.unwrap());
-    ctx.response_header = None;
-
-    let snapshotter = record_body_with_metrics(&filter, &mut ctx, b"data: {}\n\n");
-
-    let (model, _) = assert_single_ttft_histogram(&snapshotter);
-    assert_eq!(model, "gpt-4o", "model label should match metadata");
-}
-
-#[tokio::test]
-async fn second_chunk_is_noop() {
-    let filter = TimeToFirstTokenFilter;
-    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
-    let mut ctx = crate::test_utils::make_filter_context(&req);
-
-    let mut resp = make_response_with_content_type("text/event-stream");
-    ctx.response_header = Some(&mut resp);
-    drop(filter.on_response(&mut ctx).await.unwrap());
-    ctx.response_header = None;
-
-    let mut body1 = Some(Bytes::from_static(b"data: first\n\n"));
-    drop(filter.on_response_body(&mut ctx, &mut body1, false).unwrap());
-
-    assert!(!ctx.filter_metadata.contains_key(META_ACTIVE));
-
-    let mut body2 = Some(Bytes::from_static(b"data: second\n\n"));
-    drop(filter.on_response_body(&mut ctx, &mut body2, false).unwrap());
-}
-
-#[tokio::test]
-async fn empty_body_is_skipped() {
-    let filter = TimeToFirstTokenFilter;
-    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
-    let mut ctx = crate::test_utils::make_filter_context(&req);
-
-    let mut resp = make_response_with_content_type("text/event-stream");
-    ctx.response_header = Some(&mut resp);
-    drop(filter.on_response(&mut ctx).await.unwrap());
-    ctx.response_header = None;
-
-    let mut body_none: Option<Bytes> = None;
-    drop(filter.on_response_body(&mut ctx, &mut body_none, false).unwrap());
-    assert!(
-        ctx.filter_metadata.contains_key(META_ACTIVE),
-        "None body should not trigger recording"
+    let snapshotter = record_chunks(
+        &filter,
+        &mut ctx,
+        &[
+            b": keepalive\n\n".as_slice(),
+            br#"data: {"choices":[{"delta":{"content":"Hi"}}]}"#.as_slice(),
+        ],
+        true,
     );
 
-    let mut body_empty = Some(Bytes::new());
-    drop(filter.on_response_body(&mut ctx, &mut body_empty, false).unwrap());
-    assert!(
-        ctx.filter_metadata.contains_key(META_ACTIVE),
-        "empty Bytes should not trigger recording"
+    let (_, samples) = assert_single_ttft_histogram(&snapshotter);
+    assert_eq!(samples.len(), 1);
+}
+
+#[tokio::test]
+async fn responses_function_arguments_do_not_trigger_ttft() {
+    let filter = TimeToFirstTokenFilter;
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    activate_ttft!(&filter, &mut ctx);
+
+    let snapshotter = record_chunks(
+        &filter,
+        &mut ctx,
+        &[br#"data: {"type":"response.function_call_arguments.delta","delta":"{\"x\":"}"#.as_slice()],
+        true,
     );
 
-    let mut body_data = Some(Bytes::from_static(b"data: hello\n\n"));
-    drop(filter.on_response_body(&mut ctx, &mut body_data, false).unwrap());
+    assert!(ctx.extensions.get::<TtftState>().is_none());
     assert!(
-        !ctx.filter_metadata.contains_key(META_ACTIVE),
-        "non-empty body should trigger recording"
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .iter()
+            .all(|(key, ..)| key.key().name() != METRIC_TTFT_SECONDS),
+        "Responses function arguments must not trigger TTFT"
+    );
+}
+
+#[tokio::test]
+async fn chat_tool_call_delta_triggers_ttft() {
+    let filter = TimeToFirstTokenFilter;
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    activate_ttft!(&filter, &mut ctx);
+
+    let snapshotter = record_chunks(
+        &filter,
+        &mut ctx,
+        &[br#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"f"}}]}}]}"#.as_slice()],
+        true,
+    );
+
+    let (_, samples) = assert_single_ttft_histogram(&snapshotter);
+    assert_eq!(samples.len(), 1);
+}
+
+#[tokio::test]
+async fn split_output_delta_records() {
+    let filter = TimeToFirstTokenFilter;
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    activate_ttft!(&filter, &mut ctx);
+
+    let snapshotter = record_chunks(
+        &filter,
+        &mut ctx,
+        &[
+            br#"data: {"choices":[{"delta":{"con"#.as_slice(),
+            b"tent\":\"Hi\"}}]}\n\n".as_slice(),
+        ],
+        false,
+    );
+
+    let (_, samples) = assert_single_ttft_histogram(&snapshotter);
+    assert_eq!(samples.len(), 1);
+}
+
+#[tokio::test]
+async fn no_output_delta_at_eos_does_not_record() {
+    let filter = TimeToFirstTokenFilter;
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    activate_ttft!(&filter, &mut ctx);
+
+    let snapshotter = record_chunks(
+        &filter,
+        &mut ctx,
+        &[br#"data: {"choices":[{"delta":{"role":"assistant"}}]}"#.as_slice()],
+        true,
+    );
+
+    assert!(ctx.extensions.get::<TtftState>().is_none());
+    assert!(
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .iter()
+            .all(|(key, ..)| key.key().name() != METRIC_TTFT_SECONDS)
     );
 }
 
@@ -212,7 +286,7 @@ async fn body_without_on_response_is_noop() {
     drop(filter.on_response_body(&mut ctx, &mut body, false).unwrap());
 
     assert!(
-        !ctx.filter_metadata.contains_key(META_ACTIVE),
+        ctx.extensions.get::<TtftState>().is_none(),
         "no TTFT state should exist without on_response"
     );
 }
@@ -286,6 +360,22 @@ fn resolve_model_unknown_fallback() {
 }
 
 #[test]
+fn resolve_model_ignores_raw_x_model_header() {
+    let mut req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    req.headers.insert(
+        http::header::HeaderName::from_static("x-model"),
+        HeaderValue::from_static("client-claimed-model"),
+    );
+    let ctx = crate::test_utils::make_filter_context(&req);
+
+    assert_eq!(
+        resolve_model(&ctx),
+        "unknown",
+        "a raw client X-Model request header must never become a metric label"
+    );
+}
+
+#[test]
 fn resolve_model_rejects_control_characters() {
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -347,6 +437,27 @@ fn response_body_access_is_read_only() {
 // Test Helpers
 // -----------------------------------------------------------------------------
 
+fn record_chunks(
+    filter: &TimeToFirstTokenFilter,
+    ctx: &mut HttpFilterContext<'_>,
+    chunks: &[&'static [u8]],
+    end_of_stream: bool,
+) -> metrics_util::debugging::Snapshotter {
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || {
+        for chunk in chunks {
+            let mut body = Some(Bytes::from_static(chunk));
+            drop(filter.on_response_body(ctx, &mut body, false).unwrap());
+        }
+        if end_of_stream {
+            let mut body = None;
+            drop(filter.on_response_body(ctx, &mut body, true).unwrap());
+        }
+    });
+    snapshotter
+}
+
 fn make_response_with_content_type(ct: &str) -> Response {
     let mut resp = crate::test_utils::make_response();
     resp.headers.insert("content-type", HeaderValue::from_str(ct).unwrap());
@@ -360,20 +471,6 @@ fn make_response_with_status_and_content_type(status: http::StatusCode, ct: &str
     };
     resp.headers.insert("content-type", HeaderValue::from_str(ct).unwrap());
     resp
-}
-
-fn record_body_with_metrics(
-    filter: &TimeToFirstTokenFilter,
-    ctx: &mut HttpFilterContext<'_>,
-    chunk: &'static [u8],
-) -> metrics_util::debugging::Snapshotter {
-    let recorder = metrics_util::debugging::DebuggingRecorder::new();
-    let snapshotter = recorder.snapshotter();
-    metrics::with_local_recorder(&recorder, || {
-        let mut body = Some(Bytes::from(chunk));
-        drop(filter.on_response_body(ctx, &mut body, false).unwrap());
-    });
-    snapshotter
 }
 
 fn assert_single_ttft_histogram(snapshotter: &metrics_util::debugging::Snapshotter) -> (String, Vec<f64>) {

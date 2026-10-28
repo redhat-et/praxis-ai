@@ -3,8 +3,11 @@
 
 //! Boundary tests for the `token_count` filter.
 
+use std::time::Duration;
+
 use bytes::Bytes;
 use http::header::HeaderValue;
+use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 use praxis_filter::{FilterAction, HttpFilter as _, Response};
 
 use super::*;
@@ -2037,4 +2040,577 @@ async fn run_sse_extraction_at(
         ctx.get_metadata("token.output").map(str::to_owned),
         ctx.get_metadata("token.total").map(str::to_owned),
     )
+}
+
+// -----------------------------------------------------------------------------
+// LLM gateway metrics
+// -----------------------------------------------------------------------------
+
+#[test]
+#[expect(clippy::too_many_lines, reason = "test asserts many metrics")]
+fn publish_token_usage_records_llm_metrics() {
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some("cb-glm".to_owned().into());
+    ctx.set_metadata("openai_chat_completions_request.model", "gpt-x");
+
+    let usage = TokenUsage::new(12, 34, Some(46))
+        .with_cache(Some(5), None)
+        .with_reasoning(Some(2));
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || publish_token_usage(&mut ctx, usage));
+    let snap = snapshotter.snapshot().into_vec();
+
+    // Sum only series carrying the expected model/cluster labels so a
+    // resolver regression (model or cluster collapsing to "unknown") fails
+    // the totals below instead of passing on unlabeled counters.
+    let labeled_total = |name: &str| -> u64 {
+        snap.iter()
+            .filter(|(k, ..)| {
+                k.key().name() == name
+                    && k.key().labels().any(|l| l.key() == "model" && l.value() == "gpt-x")
+                    && k.key().labels().any(|l| l.key() == "cluster" && l.value() == "cb-glm")
+            })
+            .filter_map(|(_, _, _, v)| match v {
+                DebugValue::Counter(c) => Some(*c),
+                _ => None,
+            })
+            .sum()
+    };
+    let present = |name: &str| snap.iter().any(|(k, ..)| k.key().name() == name);
+
+    assert_eq!(labeled_total(crate::llm_metrics::METRIC_PROMPT_TOKENS_TOTAL), 12);
+    assert_eq!(labeled_total(crate::llm_metrics::METRIC_OUTPUT_TOKENS_TOTAL), 34);
+    assert_eq!(labeled_total(crate::llm_metrics::METRIC_CACHE_READ_TOKENS_TOTAL), 5);
+    assert_eq!(labeled_total(crate::llm_metrics::METRIC_REASONING_TOKENS_TOTAL), 2);
+    assert!(
+        !present(crate::llm_metrics::METRIC_EMPTY_COMPLETIONS_TOTAL),
+        "empty_completions must not be recorded on a non-empty response"
+    );
+}
+
+#[test]
+fn publish_token_usage_bumps_empty_completions_on_zero_output() {
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.set_metadata(crate::llm_metrics::META_MODEL_TO_HEADER_MODEL, "gpt-x");
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || {
+        publish_token_usage(&mut ctx, TokenUsage::new(12, 0, Some(12)));
+    });
+    let snap = snapshotter.snapshot().into_vec();
+
+    let total = |name: &str| -> u64 {
+        snap.iter()
+            .filter(|(k, ..)| k.key().name() == name)
+            .filter_map(|(_, _, _, v)| match v {
+                DebugValue::Counter(c) => Some(*c),
+                _ => None,
+            })
+            .sum()
+    };
+
+    assert_eq!(total(crate::llm_metrics::METRIC_EMPTY_COMPLETIONS_TOTAL), 1);
+}
+
+#[test]
+fn publish_token_usage_excludes_non_generation_terminations_from_empty_completions() {
+    for reason in ["tool_calls", "refusal", "content_filter"] {
+        let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_metadata(crate::llm_metrics::META_MODEL_TO_HEADER_MODEL, "gpt-x");
+        ctx.set_metadata(META_FINISH_RECORDED, reason);
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
+            publish_token_usage(&mut ctx, TokenUsage::new(12, 0, Some(12)));
+        });
+        let snap = snapshotter.snapshot().into_vec();
+
+        assert!(
+            !snap
+                .iter()
+                .any(|(key, ..)| key.key().name() == crate::llm_metrics::METRIC_EMPTY_COMPLETIONS_TOTAL),
+            "empty_completions must not count {reason} terminations"
+        );
+    }
+}
+
+#[test]
+#[expect(clippy::too_many_lines, reason = "test asserts many metrics")]
+fn bedrock_headers_record_llm_metrics() {
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some("bedrock".to_owned().into());
+    ctx.set_metadata(crate::llm_metrics::META_MODEL_TO_HEADER_MODEL, "claude-x");
+    let mut headers = http::HeaderMap::new();
+    headers.insert(HEADER_BEDROCK_INPUT, HeaderValue::from_static("40"));
+    headers.insert(HEADER_BEDROCK_OUTPUT, HeaderValue::from_static("7"));
+    let mut resp = Response {
+        headers,
+        status: http::StatusCode::OK,
+    };
+    ctx.response_header = Some(&mut resp);
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || extract_bedrock_headers(&mut ctx));
+    let snap = snapshotter.snapshot().into_vec();
+
+    // Sum only series carrying the expected model/cluster labels so a
+    // resolver regression (model or cluster collapsing to "unknown") fails
+    // the totals below instead of passing on unlabeled counters.
+    let labeled_total = |name: &str| -> u64 {
+        snap.iter()
+            .filter(|(k, ..)| {
+                k.key().name() == name
+                    && k.key().labels().any(|l| l.key() == "model" && l.value() == "claude-x")
+                    && k.key().labels().any(|l| l.key() == "cluster" && l.value() == "bedrock")
+            })
+            .filter_map(|(_, _, _, v)| match v {
+                DebugValue::Counter(c) => Some(*c),
+                _ => None,
+            })
+            .sum()
+    };
+    let present = |name: &str| snap.iter().any(|(k, ..)| k.key().name() == name);
+
+    assert_eq!(labeled_total(crate::llm_metrics::METRIC_PROMPT_TOKENS_TOTAL), 40);
+    assert_eq!(labeled_total(crate::llm_metrics::METRIC_OUTPUT_TOKENS_TOTAL), 7);
+    assert!(
+        !present(crate::llm_metrics::METRIC_CACHE_READ_TOKENS_TOTAL),
+        "Bedrock headers carry no cache breakdown"
+    );
+    assert!(
+        !present(crate::llm_metrics::METRIC_EMPTY_COMPLETIONS_TOTAL),
+        "empty_completions must not be recorded on a non-empty response"
+    );
+}
+
+#[test]
+fn bedrock_headers_without_headers_record_nothing() {
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut resp = Response {
+        headers: http::HeaderMap::new(),
+        status: http::StatusCode::OK,
+    };
+    ctx.response_header = Some(&mut resp);
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || extract_bedrock_headers(&mut ctx));
+    let snap = snapshotter.snapshot().into_vec();
+
+    assert!(
+        snap.is_empty(),
+        "missing Bedrock token headers should record nothing, got {snap:?}"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// TPOT and finish-reason metrics
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn metrics_sse_openai_records_finish_reason() {
+    let filter = make_filter(ProviderKind::OpenAi);
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some("test-cluster".to_owned().into());
+    ctx.set_metadata(crate::llm_metrics::META_MODEL_TO_HEADER_MODEL, "test-model");
+
+    let mut resp = make_response_with_content_type("text/event-stream");
+    ctx.response_header = Some(&mut resp);
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+
+    let events = b"data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},\"finish_reason\":\"stop\"}]}\n\n";
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || {
+        let mut body = Some(Bytes::copy_from_slice(events));
+        drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+    });
+    let snap = snapshotter.snapshot().into_vec();
+
+    let total: u64 = snap
+        .iter()
+        .filter(|(key, ..)| {
+            key.key().name() == crate::llm_metrics::METRIC_FINISH_REASONS_TOTAL
+                && key.key().labels().any(|l| l.key() == "reason" && l.value() == "stop")
+        })
+        .filter_map(|(_, _, _, value)| match value {
+            DebugValue::Counter(count) => Some(*count),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(total, 1, "OpenAI finish_reason stop should be recorded once");
+}
+
+#[test]
+fn output_deltas_record_itl_and_one_vllm_tpot_sample() {
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some("test-cluster".to_owned().into());
+    ctx.set_metadata(crate::llm_metrics::META_MODEL_TO_HEADER_MODEL, "test-model");
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || {
+        record_output_delta(&mut ctx);
+        record_output_delta(&mut ctx);
+        record_output_delta(&mut ctx);
+        record_streaming_tpot(&mut ctx, 4);
+    });
+    let snap = snapshotter.snapshot().into_vec();
+
+    let samples = |name: &str| -> usize {
+        snap.iter()
+            .filter_map(|(key, _, _, value)| {
+                if key.key().name() == name
+                    && let DebugValue::Histogram(values) = value
+                {
+                    Some(values.len())
+                } else {
+                    None
+                }
+            })
+            .sum()
+    };
+    assert_eq!(samples(crate::llm_metrics::METRIC_ITL_SECONDS), 2);
+    assert_eq!(samples(crate::llm_metrics::METRIC_TPOT_SECONDS), 1);
+}
+
+#[test]
+#[expect(clippy::too_many_lines, reason = "formula and skip assertions stay together")]
+fn tpot_uses_vllm_formula_and_skips_single_token_responses() {
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let start = Instant::now();
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || {
+        ctx.extensions.insert(StreamTimingState {
+            first_output: start,
+            last_output: start + Duration::from_secs(2),
+            itl: crate::llm_metrics::itl_histogram("test-model", "test-cluster"),
+            tpot: crate::llm_metrics::tpot_histogram("test-model", "test-cluster"),
+        });
+        record_streaming_tpot(&mut ctx, 5);
+    });
+    let snap = snapshotter.snapshot().into_vec();
+
+    let values: Vec<f64> = snap
+        .iter()
+        .filter_map(|(key, _, _, value)| {
+            if key.key().name() == crate::llm_metrics::METRIC_TPOT_SECONDS
+                && let DebugValue::Histogram(values) = value
+            {
+                Some(values.iter().map(|value| value.into_inner()).collect::<Vec<f64>>())
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .collect();
+    assert_eq!(values, vec![0.5], "(2s) / (5-1 output tokens) == 0.5s");
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || {
+        ctx.extensions.insert(StreamTimingState {
+            first_output: start,
+            last_output: start + Duration::from_secs(2),
+            itl: crate::llm_metrics::itl_histogram("test-model", "test-cluster"),
+            tpot: crate::llm_metrics::tpot_histogram("test-model", "test-cluster"),
+        });
+        record_streaming_tpot(&mut ctx, 1);
+    });
+    let samples: usize = snapshotter
+        .snapshot()
+        .into_vec()
+        .iter()
+        .filter_map(|(key, _, _, value)| {
+            if key.key().name() == crate::llm_metrics::METRIC_TPOT_SECONDS
+                && let DebugValue::Histogram(values) = value
+            {
+                Some(values.len())
+            } else {
+                None
+            }
+        })
+        .sum();
+    assert_eq!(samples, 0, "single-token responses must not produce TPOT");
+}
+
+#[test]
+fn non_output_sse_events_do_not_start_timing() {
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some("test-cluster".to_owned().into());
+    ctx.set_metadata(crate::llm_metrics::META_MODEL_TO_HEADER_MODEL, "test-model");
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || {
+        process_sse_payload(
+            &mut ctx,
+            br#"{"choices":[{"delta":{"role":"assistant"}}]}"#,
+            ProviderKind::OpenAi,
+        );
+        process_sse_payload(
+            &mut ctx,
+            br#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+            ProviderKind::OpenAi,
+        );
+    });
+
+    assert!(ctx.extensions.get::<StreamTimingState>().is_none());
+    assert!(
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .iter()
+            .all(|(key, ..)| key.key().name() != crate::llm_metrics::METRIC_ITL_SECONDS)
+    );
+}
+
+#[tokio::test]
+#[expect(clippy::too_many_lines, reason = "test setup and metric assertions stay together")]
+async fn sse_terminal_usage_event_records_tpot_and_itl() {
+    let filter = make_filter(ProviderKind::OpenAi);
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some("test-cluster".to_owned().into());
+    ctx.set_metadata(crate::llm_metrics::META_MODEL_TO_HEADER_MODEL, "test-model");
+
+    let mut resp = make_response_with_content_type("text/event-stream");
+    ctx.response_header = Some(&mut resp);
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+
+    let events = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"A\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"B\"}}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":3,\"total_tokens\":13}}\n\n",
+    );
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || {
+        let mut body = Some(Bytes::copy_from_slice(events.as_bytes()));
+        drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+    });
+
+    assert_eq!(ctx.get_metadata("token.output"), Some("3"));
+    let snap = snapshotter.snapshot().into_vec();
+    let samples = |name: &str| -> usize {
+        snap.iter()
+            .filter_map(|(key, _, _, value)| {
+                if key.key().name() == name
+                    && let DebugValue::Histogram(values) = value
+                {
+                    Some(values.len())
+                } else {
+                    None
+                }
+            })
+            .sum()
+    };
+    assert_eq!(samples(crate::llm_metrics::METRIC_TPOT_SECONDS), 1);
+    assert_eq!(samples(crate::llm_metrics::METRIC_ITL_SECONDS), 1);
+}
+
+#[tokio::test]
+#[expect(clippy::too_many_lines, reason = "test setup and metric assertions stay together")]
+async fn sse_terminal_usage_event_with_single_output_token_skips_tpot() {
+    let filter = make_filter(ProviderKind::OpenAi);
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some("test-cluster".to_owned().into());
+    ctx.set_metadata(crate::llm_metrics::META_MODEL_TO_HEADER_MODEL, "test-model");
+
+    let mut resp = make_response_with_content_type("text/event-stream");
+    ctx.response_header = Some(&mut resp);
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+
+    let events = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"A\"}}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":1,\"total_tokens\":11}}\n\n",
+    );
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || {
+        let mut body = Some(Bytes::copy_from_slice(events.as_bytes()));
+        drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+    });
+
+    assert_eq!(ctx.get_metadata("token.output"), Some("1"));
+    let snap = snapshotter.snapshot().into_vec();
+    let tpot_samples: usize = snap
+        .iter()
+        .filter_map(|(key, _, _, value)| {
+            if key.key().name() == crate::llm_metrics::METRIC_TPOT_SECONDS
+                && let DebugValue::Histogram(values) = value
+            {
+                Some(values.len())
+            } else {
+                None
+            }
+        })
+        .sum();
+    assert_eq!(tpot_samples, 0, "output_tokens <= 1 must not produce TPOT");
+}
+
+#[tokio::test]
+#[expect(clippy::too_many_lines, reason = "test setup and metric assertions stay together")]
+async fn sse_without_usage_does_not_emit_empty_completion() {
+    let filter = make_filter(ProviderKind::OpenAi);
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some("test-cluster".to_owned().into());
+    ctx.set_metadata(crate::llm_metrics::META_MODEL_TO_HEADER_MODEL, "test-model");
+
+    let mut resp = make_response_with_content_type("text/event-stream");
+    ctx.response_header = Some(&mut resp);
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+
+    let events = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"A\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"B\"}}]}\n\n",
+    );
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || {
+        let mut body = Some(Bytes::copy_from_slice(events.as_bytes()));
+        drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+    });
+
+    assert!(ctx.get_metadata("token.output").is_none());
+    let snap = snapshotter.snapshot().into_vec();
+    assert!(
+        snap.iter()
+            .all(|(key, ..)| key.key().name() != crate::llm_metrics::METRIC_EMPTY_COMPLETIONS_TOTAL),
+        "no-usage streams cannot infer an empty completion"
+    );
+    let itl_samples: usize = snap
+        .iter()
+        .filter_map(|(key, _, _, value)| {
+            if key.key().name() == crate::llm_metrics::METRIC_ITL_SECONDS
+                && let DebugValue::Histogram(values) = value
+            {
+                Some(values.len())
+            } else {
+                None
+            }
+        })
+        .sum();
+    assert_eq!(itl_samples, 1);
+    let tpot_samples: usize = snap
+        .iter()
+        .filter_map(|(key, _, _, value)| {
+            if key.key().name() == crate::llm_metrics::METRIC_TPOT_SECONDS
+                && let DebugValue::Histogram(values) = value
+            {
+                Some(values.len())
+            } else {
+                None
+            }
+        })
+        .sum();
+    assert_eq!(tpot_samples, 0);
+}
+
+#[test]
+fn extract_finish_reason_is_provider_aware() {
+    assert_eq!(
+        extract_finish_reason(br#"{"choices":[{"finish_reason":"stop"}]}"#, ProviderKind::OpenAi),
+        Some("stop".to_owned())
+    );
+    assert_eq!(
+        extract_finish_reason(br#"{"delta":{"stop_reason":"end_turn"}}"#, ProviderKind::Anthropic),
+        Some("end_turn".to_owned())
+    );
+    assert_eq!(
+        extract_finish_reason(
+            br#"{"candidates":[{"finishReason":"MAX_TOKENS"}]}"#,
+            ProviderKind::Google
+        ),
+        Some("MAX_TOKENS".to_owned())
+    );
+    assert_eq!(
+        extract_finish_reason(br#"{"messageStop":{"stopReason":"tool_use"}}"#, ProviderKind::Bedrock),
+        Some("tool_use".to_owned())
+    );
+    assert_eq!(extract_finish_reason(b"{}", ProviderKind::Auto), None);
+    assert_eq!(extract_finish_reason(b"{}", ProviderKind::BedrockInvokeModel), None);
+}
+
+#[test]
+fn normalize_finish_reason_bounds_labels() {
+    assert_eq!(normalize_finish_reason("stop"), "stop");
+    assert_eq!(normalize_finish_reason("end_turn"), "stop");
+    assert_eq!(normalize_finish_reason("max_tokens"), "length");
+    assert_eq!(normalize_finish_reason("tool_use"), "tool_calls");
+    assert_eq!(normalize_finish_reason("SAFETY"), "content_filter");
+    assert_eq!(normalize_finish_reason("stop_sequence"), "stop_sequence");
+    assert_eq!(normalize_finish_reason("brand_new_reason"), "other");
+}
+
+#[test]
+#[ignore = "release-mode overhead benchmark; run with --release --ignored --nocapture"]
+#[expect(clippy::too_many_lines, reason = "benchmark setup and assertions stay together")]
+#[expect(clippy::print_stdout, reason = "release-mode benchmark output")]
+fn metrics_overhead_is_within_budget() {
+    const ITERATIONS: usize = 100_000;
+    const BUDGET_NANOS: u128 = 50_000;
+
+    let payload = br#"{"choices":[{"delta":{"content":"token"}}]}"#;
+    let mut detector_samples = Vec::with_capacity(ITERATIONS);
+    for _ in 0..ITERATIONS {
+        let start = Instant::now();
+        std::hint::black_box(crate::llm_output_delta::payload_has_output_delta(payload));
+        detector_samples.push(start.elapsed().as_nanos());
+    }
+
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut itl_samples = Vec::with_capacity(ITERATIONS);
+    metrics::with_local_recorder(&metrics::NoopRecorder, || {
+        ctx.extensions.insert(StreamTimingState {
+            first_output: Instant::now(),
+            last_output: Instant::now(),
+            itl: crate::llm_metrics::itl_histogram("test-model", "test-cluster"),
+            tpot: crate::llm_metrics::tpot_histogram("test-model", "test-cluster"),
+        });
+        for _ in 0..ITERATIONS {
+            let start = Instant::now();
+            record_output_delta(&mut ctx);
+            itl_samples.push(start.elapsed().as_nanos());
+        }
+    });
+
+    detector_samples.sort_unstable();
+    itl_samples.sort_unstable();
+    let p99 = |samples: &[u128]| samples[ITERATIONS * 99 / 100];
+    println!(
+        "detector p99={}ns itl-record p99={}ns",
+        p99(&detector_samples),
+        p99(&itl_samples)
+    );
+    assert!(
+        p99(&detector_samples) < BUDGET_NANOS,
+        "output-delta detector exceeded 50us p99"
+    );
+    assert!(p99(&itl_samples) < BUDGET_NANOS, "ITL recording exceeded 50us p99");
 }
