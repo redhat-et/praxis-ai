@@ -46,6 +46,7 @@ For repository contributors building, testing, or extending Praxis AI:
 
 ## Operations and releases
 
+- [EnMaaS image publishing](enmaas-image-publishing.md)
 - [Capacity planning: file descriptors](capacity-planning.md)
 - [Release process](release.md)
 - [FIPS 140-3](fips.md)
