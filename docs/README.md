@@ -44,6 +44,10 @@ For repository contributors building, testing, or extending Praxis AI:
 - [Project management](developing/project-management.md)
 - [Proposal process](https://github.com/praxis-proxy/enhancements)
 
+## Observability
+
+- [LLM gateway metrics](llm-metrics.md)
+
 ## Operations and releases
 
 - [EnMaaS image publishing](enmaas-image-publishing.md)
