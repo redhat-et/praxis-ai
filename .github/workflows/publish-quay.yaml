@@ -1,0 +1,141 @@
+name: Publish (quay)
+
+# Fork-side quay publish. The upstream publish.yaml targets GHCR on a
+# nightly schedule with FIPS variants; this workflow pushes the EnMaaS
+# deployment image (quay.io/modden/praxis-ai) on every push to main so
+# deployment digest pins track the fork. Keeping it a separate file means
+# upstream rebases never conflict with it. Ownership, rotation, and the
+# release policy are documented in docs/enmaas-image-publishing.md.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Optional commit SHA on main; defaults to the selected ref's commit.
+        required: false
+        type: string
+
+concurrency:
+  group: publish-quay-${{ inputs.commit || github.sha }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  publish-quay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      IMAGE: quay.io/modden/praxis-ai
+      # MUST match the production deployment build:
+      # gcp-adc-filter is required for the production GCP ADC credential
+      # filter — production routing breaks without it.
+      PRAXIS_AI_FEATURES: full,gcp-adc-filter
+      SOURCE_SHA: ${{ inputs.commit || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit || github.sha }}
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to quay
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        env:
+          IMAGE: ${{ env.IMAGE }}
+          SOURCE_SHA: ${{ env.SOURCE_SHA }}
+        run: |
+          {
+            echo "tags<<EOF"
+            echo "${IMAGE}:sha-${SOURCE_SHA}"
+            if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+              echo "${IMAGE}:main"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Containerfile
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.SOURCE_SHA }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          build-args: |
+            PRAXIS_AI_FEATURES=${{ env.PRAXIS_AI_FEATURES }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Generate source SBOM
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: .
+          format: spdx-json
+          output-file: source.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Generate image SBOM
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: image.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Verify SBOM files
+        run: |
+          test -s source.spdx.json
+          test -s image.spdx.json
+          jq -e '.spdxVersion' source.spdx.json >/dev/null
+          jq -e '.spdxVersion' image.spdx.json >/dev/null
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: praxis-ai-sbom-${{ env.SOURCE_SHA }}
+          path: |
+            source.spdx.json
+            image.spdx.json
+          retention-days: 90
+
+      - name: Record digest
+        id: digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          test -n "$DIGEST"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Published praxis-ai image"
+            echo ""
+            echo "\`$IMAGE@$DIGEST\`"
+            echo ""
+            echo "- source commit: \`$SOURCE_SHA\`"
+            echo "- ref: \`$GITHUB_REF\`"
+            echo "- SBOM artifact: \`praxis-ai-sbom-$SOURCE_SHA\`"
+            echo "- workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Log out of Quay
+        if: always()
+        run: docker logout quay.io || true
