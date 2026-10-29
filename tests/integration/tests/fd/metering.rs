@@ -348,6 +348,7 @@ filter_chains:
         metering_url: "{metering_url}"
         allow_private_endpoint: true
         timeout_seconds: 5
+        decision_cache_ttl_seconds: 0
         feature_key: "inference-tokens"
         source: "ai-gateway"
         fail_open: {fail_open}

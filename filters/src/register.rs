@@ -326,6 +326,8 @@ fn register_routing_filters(registry: &mut FilterRegistry) {
     );
     register_routing_security_filter(registry, "provider_route", ProviderRouteFilter::from_config);
     register_routing_security_filter(registry, "credential_inject", CredentialInjectFilter::from_config);
+    register_routing_security_filter(registry, "qos_credential", crate::QosCredentialFilter::from_config);
+    register_routing_security_filter(registry, "qos_enforcer", crate::QosEnforcerFilter::from_config);
 }
 
 /// Register a routing HTTP filter as security-critical.
@@ -748,6 +750,8 @@ mod tests {
             "intelligent_route",
             "provider_route",
             "credential_inject",
+            "qos_credential",
+            "qos_enforcer",
             "anthropic_web_search",
             "reject_upgrade",
             "request_id",
@@ -891,6 +895,8 @@ provider:
         let registry = build_ai_registry();
         assert!(registry.is_security_filter("provider_route"));
         assert!(registry.is_security_filter("credential_inject"));
+        assert!(registry.is_security_filter("qos_credential"));
+        assert!(registry.is_security_filter("qos_enforcer"));
         #[cfg(feature = "aws-sigv4-filter")]
         assert!(registry.is_security_filter("aws_sigv4_sign"));
         assert!(registry.is_security_filter("callout_credentials"));

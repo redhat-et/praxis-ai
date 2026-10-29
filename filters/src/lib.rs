@@ -29,6 +29,8 @@ pub mod model_catalog;
 #[cfg(feature = "opentelemetry")]
 mod opentelemetry;
 pub mod prompt_enrich;
+mod qos_credential;
+mod qos_enforcer;
 mod reasoning_effort_map;
 mod register;
 mod reject_upgrade;
@@ -59,6 +61,8 @@ pub use metering::ExternalMeteringFilter;
 pub use model_access::ModelAccessFilter;
 pub use model_catalog::ModelCatalogFilter;
 pub use prompt_enrich::PromptEnrichFilter;
+pub use qos_credential::QosCredentialFilter;
+pub use qos_enforcer::QosEnforcerFilter;
 pub use reasoning_effort_map::ReasoningEffortMapFilter;
 pub use register::{build_ai_registry, install_pipeline_extensions, register_ai_filters};
 pub use reject_upgrade::RejectUpgradeFilter;

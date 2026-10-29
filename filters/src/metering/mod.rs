@@ -28,7 +28,12 @@ mod config;
 )]
 mod tests;
 
-use std::{fs, time::Duration};
+use std::{
+    collections::HashMap,
+    fs,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -44,6 +49,7 @@ use praxis_filter::{
     BodyAccess, BodyMode, FilterAction, FilterError, HttpFilter, HttpFilterContext, Rejection, parse_filter_config,
 };
 use serde::Deserialize;
+use tokio::sync::RwLock;
 use tracing::{debug, trace, warn};
 
 use self::config::{ExternalMeteringConfig, validate_config};
@@ -208,6 +214,33 @@ pub struct ExternalMeteringFilter {
     /// Optional bearer credential for gateway-to-metering calls, loaded from
     /// a projected Secret file at pipeline construction time.
     internal_auth_token: Option<HeaderValue>,
+
+    /// Short-lived local cache of the entitlement/class decision.
+    decision_cache: Arc<RwLock<HashMap<String, CachedDecision>>>,
+
+    /// TTL for [`Self::decision_cache`]; zero disables the cache.
+    decision_cache_ttl: Duration,
+
+    /// Maximum entries retained in [`Self::decision_cache`].
+    decision_cache_max_entries: usize,
+
+    /// Metadata key for the verified `QoS` class.
+    qos_class_metadata: String,
+
+    /// Metadata key for the canonical `QoS` subject.
+    qos_subject_metadata: String,
+
+    /// Class used when the response omits or malforms qosClass.
+    qos_default_class: String,
+}
+
+/// One cached entitlement response.
+#[derive(Clone)]
+struct CachedDecision {
+    /// Parsed metering response.
+    balance: BalanceResponse,
+    /// When the entry was stored.
+    cached_at: Instant,
 }
 
 impl ExternalMeteringFilter {
@@ -268,6 +301,12 @@ impl ExternalMeteringFilter {
             subrequest_client,
             timeout: Duration::from_secs(cfg.timeout_seconds),
             internal_auth_token,
+            decision_cache: Arc::new(RwLock::new(HashMap::new())),
+            decision_cache_ttl: Duration::from_secs(cfg.decision_cache_ttl_seconds),
+            decision_cache_max_entries: cfg.decision_cache_max_entries,
+            qos_class_metadata: cfg.qos_class_metadata,
+            qos_subject_metadata: cfg.qos_subject_metadata,
+            qos_default_class: cfg.qos_default_class,
         })
     }
 
@@ -278,7 +317,11 @@ impl ExternalMeteringFilter {
     /// service itself is misbehaving (bad route, internal error), so it is
     /// handled by the availability policy (`fail_open`) rather than treated
     /// as a denial.
-    async fn check_balance(&self, state: &MeteringState) -> FilterAction {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the callout has explicit success and availability branches"
+    )]
+    async fn check_balance(&self, state: &MeteringState) -> (FilterAction, Option<BalanceResponse>) {
         let url = build_balance_url(&self.metering_url, &state.username, &self.feature_key, &state.model);
         let request = SubRequest {
             method: http::Method::GET,
@@ -298,16 +341,62 @@ impl ExternalMeteringFilter {
         .await;
 
         match result {
-            Ok(resp) if is_success(resp.status) => parse_balance_result(&resp.body, self.fail_open),
+            Ok(resp) if is_success(resp.status) => {
+                let balance = decode_balance(&resp.body);
+                let action = balance
+                    .as_ref()
+                    .map_or_else(|| admit_or_reject(self.fail_open), apply_balance);
+                (action, balance)
+            },
             Ok(resp) => {
                 warn!(status = resp.status, "balance check returned a non-2xx status");
-                self.on_metering_unavailable()
+                (self.on_metering_unavailable(), None)
             },
             Err(error) => {
                 warn!(%error, "balance check unreachable");
-                self.on_metering_unavailable()
+                (self.on_metering_unavailable(), None)
             },
         }
+    }
+
+    /// Return a cached entitlement decision when it is still fresh.
+    async fn cached_decision(&self, username: &str, model: &str) -> Option<BalanceResponse> {
+        if self.decision_cache_ttl.is_zero() {
+            return None;
+        }
+        let key = decision_cache_key(username, model);
+        let cache = self.decision_cache.read().await;
+        let (fresh, balance) = {
+            let entry = cache.get(&key)?;
+            (
+                entry.cached_at.elapsed() < self.decision_cache_ttl,
+                entry.balance.clone(),
+            )
+        };
+        drop(cache);
+        fresh.then_some(balance)
+    }
+
+    /// Store an entitlement decision for the short local TTL.
+    async fn cache_decision(&self, username: &str, model: &str, balance: &BalanceResponse) {
+        if self.decision_cache_ttl.is_zero() {
+            return;
+        }
+        let key = decision_cache_key(username, model);
+        let mut cache = self.decision_cache.write().await;
+        if !cache.contains_key(&key)
+            && cache.len() >= self.decision_cache_max_entries
+            && let Some(evicted) = cache.keys().next().cloned()
+        {
+            cache.remove(&evicted);
+        }
+        cache.insert(
+            key,
+            CachedDecision {
+                balance: balance.clone(),
+                cached_at: Instant::now(),
+            },
+        );
     }
 
     /// Resolve the action to take when the balance check cannot be completed.
@@ -381,6 +470,10 @@ impl ExternalMeteringFilter {
 }
 
 #[async_trait]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the request/response hooks share the metering state machine"
+)]
 impl HttpFilter for ExternalMeteringFilter {
     fn name(&self) -> &'static str {
         "external_metering"
@@ -403,7 +496,34 @@ impl HttpFilter for ExternalMeteringFilter {
                 .insert(META_METERING_MODEL.to_owned(), state.model.clone());
         }
 
-        let action = self.check_balance(&state).await;
+        let cached = self.cached_decision(&state.username, &state.model).await;
+        let (action, balance) = if let Some(balance) = cached {
+            (apply_balance(&balance), Some(balance))
+        } else {
+            let (action, balance) = self.check_balance(&state).await;
+            if let Some(balance) = &balance {
+                self.cache_decision(&state.username, &state.model, balance).await;
+            }
+            (action, balance)
+        };
+
+        let class = normalize_qos_class(
+            balance.as_ref().and_then(|b| b.qos_class.as_deref()),
+            &self.qos_default_class,
+        );
+        ctx.set_metadata(self.qos_class_metadata.as_str(), class.clone());
+        if let Some(subject) = balance
+            .as_ref()
+            .and_then(|b| b.qos_subject.as_deref())
+            .filter(|s| !s.is_empty())
+        {
+            ctx.set_metadata(self.qos_subject_metadata.as_str(), subject.to_owned());
+        }
+        if let Some(retry_after) = balance.as_ref().and_then(|b| b.qos_retry_after) {
+            ctx.set_metadata("qos.retry_after", retry_after.to_string());
+        }
+        counter!("praxis_ai_qos_class_requests_total", "class" => class).increment(1);
+
         store_state(ctx, state);
 
         Ok(action)
@@ -541,7 +661,7 @@ struct MeteringState {
     model: String,
 
     /// Start of the request, used to derive the reported duration.
-    request_start: std::time::Instant,
+    request_start: Instant,
 
     /// Upstream response status, reported on error events.
     response_status: u16,
@@ -610,7 +730,7 @@ struct EventContext<'a> {
 }
 
 /// JSON response from the metering service balance check endpoint.
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BalanceResponse {
     /// Whether the tenant may spend more tokens.
@@ -619,6 +739,12 @@ struct BalanceResponse {
     /// Absent on older metering-service responses; the legacy hasAccess
     /// behavior is preserved in that case.
     model_allowed: Option<bool>,
+    /// Verified `QoS` class. Additive: older responses omit it.
+    qos_class: Option<String>,
+    /// Canonical `QoS` subject. Additive: older responses omit it.
+    qos_subject: Option<String>,
+    /// Suggested retry delay for a ratelimit class.
+    qos_retry_after: Option<u64>,
 }
 
 // -----------------------------------------------------------------------------
@@ -650,7 +776,7 @@ fn capture_identity(ctx: &mut HttpFilterContext<'_>, prefix: &str, identity_name
         group: identity.group,
         is_error: false,
         model: identity.model,
-        request_start: std::time::Instant::now(),
+        request_start: Instant::now(),
         response_status: 0,
         subscription: identity.subscription,
         user_agent,
@@ -785,11 +911,15 @@ fn strip_client_credentials(ctx: &mut HttpFilterContext<'_>) {
 // -----------------------------------------------------------------------------
 
 /// Interpret a balance check response body.
+#[cfg(test)]
 fn parse_balance_result(body: &[u8], fail_open: bool) -> FilterAction {
-    let Some(balance) = decode_balance(body) else {
-        return admit_or_reject(fail_open);
-    };
+    decode_balance(body)
+        .as_ref()
+        .map_or_else(|| admit_or_reject(fail_open), apply_balance)
+}
 
+/// Apply the admission decision from a parsed balance response.
+fn apply_balance(balance: &BalanceResponse) -> FilterAction {
     if balance.model_allowed == Some(false) {
         return reject_model_not_allowed();
     }
@@ -800,6 +930,22 @@ fn parse_balance_result(body: &[u8], fail_open: bool) -> FilterAction {
     } else {
         reject_budget_exhausted()
     }
+}
+
+/// Normalize a metering class to the three values the gateway understands.
+fn normalize_qos_class(value: Option<&str>, default: &str) -> String {
+    match value {
+        Some("premium") => "premium".to_owned(),
+        Some("main") => "main".to_owned(),
+        Some("ratelimit") => "ratelimit".to_owned(),
+        _ => default.to_owned(),
+    }
+}
+
+/// Cache key for one entitlement decision. The model is part of the key
+/// because the response carries a model allowlist decision.
+fn decision_cache_key(username: &str, model: &str) -> String {
+    format!("{username}\u{1f}{model}")
 }
 
 /// Decode a balance payload, logging why an unusable one was discarded.

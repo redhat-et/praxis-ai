@@ -68,7 +68,7 @@ async fn unavailable_model_policy_can_fail_closed_independently() {
     )
     .unwrap();
     let filter = build_filter(&yaml).unwrap();
-    let action = filter.check_balance(&state_for("alice", "gpt-4")).await;
+    let (action, _) = filter.check_balance(&state_for("alice", "gpt-4")).await;
     assert!(matches!(action, FilterAction::Reject(rejection) if rejection.status == 403));
 }
 
@@ -139,7 +139,8 @@ async fn internal_auth_is_sent_on_entitlement_and_event_subrequests() {
     .unwrap();
     let filter = build_filter(&yaml).unwrap();
     let state = state_for("alice", "gpt-4");
-    assert!(matches!(filter.check_balance(&state).await, FilterAction::Continue));
+    let (action, _) = filter.check_balance(&state).await;
+    assert!(matches!(action, FilterAction::Continue));
 
     let tokens = TokenCounts {
         input: 2,
@@ -293,7 +294,7 @@ fn resolve_provider_prefers_configured_value() {
     let req = make_request(http::Method::POST, "/v1/chat/completions");
     let mut ctx = make_filter_context(&req);
     // Even when a cluster is routed, the static config value wins.
-    ctx.cluster = Some(std::sync::Arc::from("routed-cluster"));
+    ctx.cluster = Some(Arc::from("routed-cluster"));
 
     assert_eq!(filter.resolve_provider(&ctx), "configured");
 }
@@ -304,7 +305,7 @@ fn resolve_provider_falls_back_to_cluster_name() {
     let filter = build_filter(&yaml).unwrap();
     let req = make_request(http::Method::POST, "/v1/chat/completions");
     let mut ctx = make_filter_context(&req);
-    ctx.cluster = Some(std::sync::Arc::from("routed-cluster"));
+    ctx.cluster = Some(Arc::from("routed-cluster"));
 
     assert_eq!(filter.resolve_provider(&ctx), "routed-cluster");
 }
@@ -1139,8 +1140,86 @@ fn state_for(username: &str, model: &str) -> MeteringState {
         subscription: "sub-1".into(),
         model: model.into(),
         user_agent: "test/1.0".into(),
-        request_start: std::time::Instant::now(),
+        request_start: Instant::now(),
         is_error: false,
         response_status: 200,
     }
+}
+
+// -----------------------------------------------------------------------------
+// QoS Class Publication
+// -----------------------------------------------------------------------------
+
+#[test]
+fn balance_response_parses_qos_fields() {
+    let body = br#"{"hasAccess": true, "qosClass": "main", "qosSubject": "uuid-1", "qosRetryAfter": 12}"#;
+    let balance = decode_balance(body).expect("valid balance response");
+    assert_eq!(balance.qos_class.as_deref(), Some("main"));
+    assert_eq!(balance.qos_subject.as_deref(), Some("uuid-1"));
+    assert_eq!(balance.qos_retry_after, Some(12));
+}
+
+#[test]
+fn qos_class_normalization_rejects_unknown_values() {
+    assert_eq!(normalize_qos_class(Some("premium"), "main"), "premium");
+    assert_eq!(normalize_qos_class(Some("ratelimit"), "main"), "ratelimit");
+    assert_eq!(normalize_qos_class(Some("bogus"), "main"), "main");
+    assert_eq!(normalize_qos_class(None, "main"), "main");
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one test covers publication, metadata, and cache reuse"
+)]
+async fn publishes_qos_class_and_subject_and_caches_decision() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/customers/alice/entitlements/inference-tokens/value"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "hasAccess": true,
+            "qosClass": "main",
+            "qosSubject": "11111111-1111-1111-1111-111111111111",
+            "qosRetryAfter": 0
+        })))
+        .mount(&server)
+        .await;
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        "metering_url: {}\nallow_private_endpoint: true\ndefault_username: alice\ndecision_cache_ttl_seconds: 60\n",
+        server.uri()
+    ))
+    .unwrap();
+    let filter = build_filter(&yaml).unwrap();
+    let req = make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue));
+    assert_eq!(ctx.get_metadata("qos.class"), Some("main"));
+    assert_eq!(
+        ctx.get_metadata("qos.subject"),
+        Some("11111111-1111-1111-1111-111111111111")
+    );
+
+    let req = make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = make_filter_context(&req);
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue));
+    assert_eq!(ctx.get_metadata("qos.class"), Some("main"));
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1, "second decision must come from the local cache");
+}
+
+#[tokio::test]
+async fn metering_fail_open_publishes_default_qos_class() {
+    let filter =
+        filter_from_yaml("metering_url: \"http://127.0.0.1:1\"\ndefault_username: alice\nqos_default_class: main\n");
+    let req = make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue));
+    assert_eq!(ctx.get_metadata("qos.class"), Some("main"));
 }

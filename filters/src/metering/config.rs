@@ -22,6 +22,21 @@ const DEFAULT_IDENTITY_HEADER_PREFIX: &str = "x-tenant-";
 /// captured identity headers under.
 const DEFAULT_IDENTITY_METADATA_NAMESPACE: &str = "identity";
 
+/// Default TTL for the local entitlement/class decision cache.
+const DEFAULT_DECISION_CACHE_TTL_SECONDS: u64 = 5;
+
+/// Default bound on cached entitlement/class decisions.
+const DEFAULT_DECISION_CACHE_MAX_ENTRIES: usize = 10_000;
+
+/// Default metadata key carrying the `QoS` class.
+const DEFAULT_QOS_CLASS_METADATA: &str = "qos.class";
+
+/// Default metadata key carrying the canonical `QoS` subject.
+const DEFAULT_QOS_SUBJECT_METADATA: &str = "qos.subject";
+
+/// Default class when the metering response omits one.
+const DEFAULT_QOS_DEFAULT_CLASS: &str = "main";
+
 /// Deserialized YAML config for the `external_metering` filter.
 ///
 /// ```yaml
@@ -118,6 +133,30 @@ pub(super) struct ExternalMeteringConfig {
     /// ordinary entitlement/budget check.
     #[serde(default = "default_true")]
     pub model_policy_fail_open: bool,
+
+    /// Short-lived local cache of the entitlement response. The metering
+    /// service already caches quota decisions for 15s; this cache absorbs
+    /// retry storms and keeps denied requests off the callout path.
+    #[serde(default = "default_decision_cache_ttl_seconds")]
+    pub decision_cache_ttl_seconds: u64,
+
+    /// Maximum number of entitlement responses retained in the local cache.
+    #[serde(default = "default_decision_cache_max_entries")]
+    pub decision_cache_max_entries: usize,
+
+    /// Metadata key where the verified `QoS` class is published for downstream
+    /// filters. It is not sent upstream.
+    #[serde(default = "default_qos_class_metadata")]
+    pub qos_class_metadata: String,
+
+    /// Metadata key where the canonical `QoS` subject is published for
+    /// downstream filters. It is not sent upstream.
+    #[serde(default = "default_qos_subject_metadata")]
+    pub qos_subject_metadata: String,
+
+    /// Class used when the metering response omits or malforms qosClass.
+    #[serde(default = "default_qos_default_class")]
+    pub qos_default_class: String,
 }
 
 /// Validate config at construction time.
@@ -151,6 +190,18 @@ pub(super) fn validate_config(cfg: &ExternalMeteringConfig) -> Result<(), Filter
         return Err("external_metering: model_policy_fail_open=false requires model_policy_check=true".into());
     }
 
+    if cfg.decision_cache_ttl_seconds > 0 && cfg.decision_cache_max_entries == 0 {
+        return Err("external_metering: decision_cache_max_entries must be greater than 0".into());
+    }
+
+    if cfg.qos_class_metadata.is_empty() || cfg.qos_subject_metadata.is_empty() {
+        return Err("external_metering: qos metadata keys must not be empty".into());
+    }
+
+    if !matches!(cfg.qos_default_class.as_str(), "premium" | "main" | "ratelimit") {
+        return Err("external_metering: qos_default_class must be premium, main, or ratelimit".into());
+    }
+
     Ok(())
 }
 
@@ -182,4 +233,29 @@ fn default_identity_header_prefix() -> String {
 /// Serde default for `identity_metadata_namespace`.
 fn default_identity_metadata_namespace() -> String {
     DEFAULT_IDENTITY_METADATA_NAMESPACE.to_owned()
+}
+
+/// Serde default for `decision_cache_ttl_seconds`.
+fn default_decision_cache_ttl_seconds() -> u64 {
+    DEFAULT_DECISION_CACHE_TTL_SECONDS
+}
+
+/// Serde default for `decision_cache_max_entries`.
+fn default_decision_cache_max_entries() -> usize {
+    DEFAULT_DECISION_CACHE_MAX_ENTRIES
+}
+
+/// Serde default for `qos_class_metadata`.
+fn default_qos_class_metadata() -> String {
+    DEFAULT_QOS_CLASS_METADATA.to_owned()
+}
+
+/// Serde default for `qos_subject_metadata`.
+fn default_qos_subject_metadata() -> String {
+    DEFAULT_QOS_SUBJECT_METADATA.to_owned()
+}
+
+/// Serde default for `qos_default_class`.
+fn default_qos_default_class() -> String {
+    DEFAULT_QOS_DEFAULT_CLASS.to_owned()
 }
