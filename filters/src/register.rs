@@ -21,10 +21,10 @@ use crate::TokenCeilingFilter;
 #[cfg(feature = "token-rate-limit-filter")]
 use crate::TokenRateLimitFilter;
 use crate::{
-    A2aFilter, AiGuardrailsFilter, ContentNormalizeFilter, CredentialInjectFilter, ExternalMeteringFilter,
+    A2aFilter, AiGuardrailsFilter, CredentialInjectFilter, ExternalMeteringFilter,
     IdentityHeaderGuardFilter, IntelligentRouteFilter, LlmisvcModelProviderResolverFilter, McpFilter,
-    ModelAccessFilter, ModelCatalogFilter, ModelToHeaderFilter, ModelToProviderFilter, PromptEnrichFilter,
-    ProviderRouteFilter, ReasoningEffortMapFilter, RejectUpgradeFilter, StreamUsageInjectFilter,
+    ModelCatalogFilter, ModelToHeaderFilter, ModelToProviderFilter, PromptEnrichFilter, ProviderRouteFilter,
+    RejectUpgradeFilter, StreamUsageInjectFilter,
     TimeToFirstTokenFilter, TokenCountFilter, TokenUsageHeadersFilter,
 };
 
@@ -217,14 +217,6 @@ fn register_general_ai_filters(registry: &mut FilterRegistry) {
     );
     praxis_filter::register_filters!(
         @register registry,
-        http "content_normalize" => ContentNormalizeFilter::from_config
-    );
-    praxis_filter::register_filters!(
-        @register registry,
-        http "model_access" => ModelAccessFilter::from_config
-    );
-    praxis_filter::register_filters!(
-        @register registry,
         http "identity_header_guard" => IdentityHeaderGuardFilter::from_config
     );
     praxis_filter::register_filters!(
@@ -242,10 +234,6 @@ fn register_general_ai_filters(registry: &mut FilterRegistry) {
     praxis_filter::register_filters!(
         @register registry,
         http "prompt_enrich" => PromptEnrichFilter::from_config
-    );
-    praxis_filter::register_filters!(
-        @register registry,
-        http "reasoning_effort_map" => ReasoningEffortMapFilter::from_config
     );
     praxis_filter::register_filters!(
         @register registry,
