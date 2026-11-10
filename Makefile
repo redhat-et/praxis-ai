@@ -144,7 +144,7 @@ test-unit-apis:
 test-unit-filters:
 	cargo test -p praxis-ai-filters $(_NOCAPTURE)
 	cargo test -p praxis-ai-filters --features full,openai-all,store-postgres $(_NOCAPTURE)
-	cargo test -p praxis-ai-filters --features full,openai-all,store-postgres,$(FILTER_EXPERIMENTAL_FEATURES) $(_NOCAPTURE)
+	cargo test -p praxis-ai-filters --features full,openai-all,store-postgres,$(FILTER_EXPERIMENTAL_FEATURES),api-key-auth-filter $(_NOCAPTURE)
 
 bench-model-to-provider:
 	cargo test --locked --release -p praxis-ai-filters --lib \
@@ -389,7 +389,7 @@ lint: lint-clippy lint-xtask
 lint-clippy: setup-lint-toolchains
 	$(LINT_CARGO) clippy --workspace --all-targets -- -D warnings
 	$(LINT_CARGO) clippy --workspace --all-targets \
-		--features $(STORE_ALL_WORKSPACE_FEATURES),xtask/openai-all,praxis-ai-proxy/azure-ad-filter,praxis-ai-proxy/basic-auth-filter,praxis-ai-proxy/gcp-adc-filter,praxis-ai-proxy/http-callout-filter,praxis-ai-proxy/token-rate-limit-filter,praxis-ai-proxy/token-ceiling-filter,praxis-ai-proxy/inflight-tracker-filter,praxis-ai-proxy/vertex-anthropic-filter,praxis-tests-integration/azure-ad-filter,praxis-tests-integration/basic-auth-filter,praxis-tests-integration/gcp-adc-filter,praxis-tests-integration/http-callout-filter,praxis-tests-integration/token-rate-limit-filter,praxis-tests-integration/token-ceiling-filter,praxis-tests-integration/inflight-tracker-filter,praxis-tests-integration/vertex-anthropic-filter \
+		--features $(STORE_ALL_WORKSPACE_FEATURES),xtask/openai-all,praxis-ai-proxy/api-key-auth-filter,praxis-ai-proxy/azure-ad-filter,praxis-ai-proxy/basic-auth-filter,praxis-ai-proxy/gcp-adc-filter,praxis-ai-proxy/http-callout-filter,praxis-ai-proxy/token-rate-limit-filter,praxis-ai-proxy/token-ceiling-filter,praxis-ai-proxy/inflight-tracker-filter,praxis-ai-proxy/vertex-anthropic-filter,praxis-tests-integration/azure-ad-filter,praxis-tests-integration/basic-auth-filter,praxis-tests-integration/gcp-adc-filter,praxis-tests-integration/http-callout-filter,praxis-tests-integration/token-rate-limit-filter,praxis-tests-integration/token-ceiling-filter,praxis-tests-integration/inflight-tracker-filter,praxis-tests-integration/vertex-anthropic-filter \
 		-- -D warnings
 	$(MAKE) lint-lean
 	$(MAKE) check-dep-budget

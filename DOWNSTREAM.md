@@ -1,64 +1,74 @@
 # Red Hat Praxis AI downstream
 
-This repository is the ET downstream of
-[`praxis-proxy/ai`](https://github.com/praxis-proxy/ai) and is the source for
-EnMaaS Praxis images. Runtime configuration and credentials remain in
+This repository builds EnMaaS Praxis images from
+[`praxis-proxy/ai`](https://github.com/praxis-proxy/ai). Runtime configuration
+and credentials belong to
 [`redhat-et/pricetag`](https://github.com/redhat-et/pricetag).
 
-## Purpose of this document
+## Current upstream update
 
-This is the focused EnMaaS capability handoff for the Praxis team. It lists
-only the six ET-owned capabilities that still provide functionality not yet
-available in the upstream Praxis stack. The goal is to decide, with the Praxis
-team, whether each capability should be implemented upstream, replaced by an
-existing upstream primitive, or remain an explicitly downstream integration.
+The November 10 update integrates upstream main at
+[`7afa1699`](https://github.com/praxis-proxy/ai/commit/7afa1699e70bcd472d1db4c980b9177ca6f1d57c),
+with workspace version 0.10.0 and Praxis core 0.8.0. The local merge preserves
+both histories. Its content resolution uses upstream `75e8662d` as the
+effective baseline of the previous squash-based synchronization.
 
-The inventory is intentionally not a list of every filter currently present in
-the ET image.
+Step one is updating the fork and producing branch images with the required
+behavior preserved. Step two is retiring custom implementations through
+upstream replacements and contributions. The final destination is a fork
+that builds pinned, unmodified upstream source.
 
-## EnMaaS architecture reference
+The image's feature list is explicit because upstream `full` no longer
+enables OpenAI Responses/Conversations or PostgreSQL. See
+[image publishing](docs/enmaas-image-publishing.md) for the build profile,
+manual branch builds, immutable tags, SBOMs, and promotion policy. A branch
+build does not promote a production image.
 
-See the [EnMaaS production gateway architecture and request flow](https://noyitz.github.io/ai-gateway-docs/enmaas-flow.html).
-Purple nodes in the diagram identify custom ET filters or ET-specific filter
-extensions; the remaining nodes represent upstream Praxis/core components,
-provider services, or deployment infrastructure.
+## Retained runtime contracts
 
-## Six remaining EnMaaS capabilities
+| Capability | Current compatibility contract | Upstream direction |
+|---|---|---|
+| API-key authentication | `api_key_auth` validates MaaS keys and publishes trusted tenant metadata and key IDs. Enabled explicitly in EnMaaS builds. | PPE already implements the HTTP validation mechanism; migrate trusted identity consumers before removing the filter. [Tracking](https://github.com/praxis-proxy/ai/issues/707). |
+| Catalog | `model_catalog` projects static or overlay-backed model lists with dialect and credential metadata. | Compare overlay authority with the proposed upstream [catalog](https://github.com/praxis-proxy/ai/pull/1839). |
+| QoS and admission | `enmaas-policy-filter` calls Metering directly, caches decisions, applies cluster-scoped class/subject request limits and credentials, and preserves global explicit model/quota denials. | Decompose the contracts into upstream policy, rate limiting, credential selection, and event handling. No complete replacement is assumed. |
+| Model routing | Upstream `models[].upstream` selects a cluster. Legacy `models[].provider` continues to set the provider header for existing routers. Mixing both schemas is rejected. Legacy intelligent-route overlay fields remain supported. | Migrate deployed configurations to upstream provider profiles and direct cluster selection. |
+| Vertex Anthropic | Upstream `anthropic_messages_to_vertexai_anthropic` is available with its feature. Legacy `vertex` remains registered for deployed configurations and keeps encoding/SSE handling. | Migrate and qualify configurations before removing the legacy translator and temporary deployment header-stripping workaround. |
+| Model access and normalization | Existing `model_access`, `content_normalize`, and `reasoning_effort_map` configurations remain available. | Confirm all deployed profiles use upstream alternatives before deletion. |
+| Metering authorization | `model_policy_check` and its availability setting preserve model-policy preflight and explicit denial behavior. | Follow the upstream [model-policy preflight](https://github.com/praxis-proxy/ai/pull/1912). |
+| Metering credentials | `internal_auth_file` is a compatibility spelling for upstream's watched file credential source. It cannot be combined with `internal_auth_token`. | Prefer `internal_auth_token: {file: /path}` in new configurations. The implementation uses upstream rotation and failure handling. |
+| Accounting | Automatic parser selection and provider-specific completion/reasoning normalization remain. Upstream buffered-body accumulation is retained. | Follow [automatic parser selection](https://github.com/praxis-proxy/ai/pull/1911) and contribute remaining normalization cases. |
+| Timing and metrics | Preserve actual-output TTFT detection, per-request TPOT, ITL, finish reasons, and empty-completion classification. | Upstream basic metrics do not establish parity with these definitions. TTFT still starts at the original request. |
+| Upgrade admission | `reject_upgrade` preserves rejection before body-dependent policies can be bypassed. | Follow [core upgrade admission](https://github.com/praxis-proxy/praxis/issues/1482). |
 
-| Capability | EnMaaS behavior | ET implementation | Upstream tracking | Long-term question |
-|---|---|---|---|---|
-| `api_key_auth` | Validates MaaS API keys and publishes trusted tenant identity for gateway authorization | `filters/src/api_key_auth/` | [Issue #707](https://github.com/praxis-proxy/ai/issues/707) | Can upstream provide a generic external API-key validator with configurable validation endpoint, identity mapping, caching, and fail-closed behavior? |
-| `model_catalog` | Serves credential/dialect-specific `/v1/models` responses from the authoritative routing catalog | `filters/src/model_catalog/` | [Issue #1067](https://github.com/praxis-proxy/ai/issues/1067) | Can upstream own a provider-neutral catalog projection with principal/dialect filtering and reloadable configuration? |
-| `reject_upgrade` | Rejects connection upgrades that would bypass body-based authorization, metering, and token accounting | `filters/src/reject_upgrade/` | [Issue #1359](https://github.com/praxis-proxy/ai/issues/1359) | Should Praxis provide a standard policy for rejecting or safely handling upgrades before body-dependent filters? |
-| `token_count` provider `auto` | Selects the correct usage parser for mixed OpenAI/Anthropic traffic on shared listeners | `filters/src/token_usage/count.rs` | [Issue #1720](https://github.com/praxis-proxy/ai/issues/1720) | Can upstream expose a documented automatic dialect/parser mode with bounded, fail-safe behavior? |
-| File-backed internal metering auth | Reads a Secret-mounted bearer token for private Metering calls and supports rotation without rebuilding the image | `filters/src/metering/` | [Issue #1721](https://github.com/praxis-proxy/ai/issues/1721) | Can the external metering filter support a safe file credential source and rotation semantics? |
-| Metering model-policy preflight | Sends the resolved model and tenant to the Metering policy API before provider forwarding; denial becomes HTTP 403 | `filters/src/metering/` | [Issue #1719](https://github.com/praxis-proxy/ai/issues/1719) | Can upstream support an optional authorization preflight distinct from ordinary usage-accounting fail-open behavior? |
+Upstream GCP key-file authentication and cluster scoping replace the previous
+implementation. The EnMaaS crate uses the current shared subrequest client;
+the Python policy service is not reintroduced. Preserve configured QoS modes
+during the update rather than enabling enforcement as part of synchronization.
 
-## Questions for the Praxis team
+## Operational qualification
 
-For each of the six issues above, please confirm:
+The current upstream target includes the model-inspection body-limit and
+oversized-upload fixes. Buffering routes need consistent request and buffer
+limits. Token-capture limits remain separate; validate large JSON, terminal
+SSE usage events, response replay, and memory under concurrency before raising
+production limits. Legacy provider mappings now inherit pipeline limits by
+default and enforce an explicitly configured processing cap with HTTP 413.
 
-1. Is the capability appropriate for upstream Praxis, or should it remain an
-   ET/platform integration?
-2. If upstream-appropriate, what API/configuration contract should ET target?
-3. What security, reload, failure-mode, and integration-test requirements must
-   be satisfied before ET can remove its implementation?
-4. Is there an existing upstream filter or core capability that should replace
-   the ET behavior instead?
+Track the team's existing operational requirements alongside this update:
 
-## Current downstream sync
+- [Large request/response bodies](https://github.com/redhat-et/EnMaaS-opps/issues/41):
+  qualify transport and capture limits together; never interpret missing or
+  overflowed usage as a proven zero charge.
+- [Client disconnects](https://github.com/redhat-et/EnMaaS-opps/issues/40):
+  upload-specific 499 handling does not cover all Pingora disconnect paths.
+  Cancellation, logging, and incomplete-stream accounting need separate proof.
+- [TTFT and retries](https://github.com/redhat-et/EnMaaS-opps/issues/39):
+  distinguish end-to-end latency from successful-attempt latency. The issue
+  records a silence expiry of November 19, 2026 at 02:56 UTC; confirm its live
+  state and ownership before that deadline.
 
-The ET `main` branch is synchronized with upstream through the normal downstream
-workflow. Resolve sync conflicts in ET, run the required checks, and record the
-resulting sync commit here before building an EnMaaS image.
-
-## Temporary downstream backports
-
-- `apis/src/vertex/mod.rs` (Anthropic→Vertex `rawPredict`): the deployed
-  image still carries the pre-v0.8.0 module. It now strips `Accept-Encoding`
-  and WARNs when a response with an armed transform is encoded or when an SSE
-  chunk cannot be parsed (backport of the v0.8.0 `apis/src/vertex/anthropic`
-  behavior). Delete this module at the v0.8.0 sync. The interim
-  `headers.request_remove: accept-encoding` entries in the base and QoS
-  Praxis configs can be reverted once the rebuilt image is deployed (avoid a
-  permanent double-strip).
+The upstream update does not claim these operational issues are closed.
+Qualification must record the exact image digest and rendered configuration,
+with a compatible image/config rollback pair. Remove a runtime patch only when
+its replacement is present in the selected upstream revision and the required
+behavior has been verified.

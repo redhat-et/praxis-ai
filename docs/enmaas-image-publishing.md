@@ -6,7 +6,7 @@ in [the release process](release.md); this document covers only the fork-side
 Quay image.
 
 The image is built by `.github/workflows/publish-quay.yaml` on every push to
-`main`, with a manual dispatch path for rebuilding a specific `main` commit,
+`main`, with a manual dispatch path for building a selected branch commit,
 and pushed to:
 
 ```text
@@ -23,13 +23,14 @@ updating the GitHub Actions secrets, and updating the cluster pull secret.
 The workflow must keep:
 
 ```text
-PRAXIS_AI_FEATURES=full,gcp-adc-filter
+PRAXIS_AI_FEATURES=full,openai-all,store-postgres,gcp-adc-filter,vertex-anthropic-filter,api-key-auth-filter
 ```
 
-This matches the production deployment build. The `gcp-adc-filter` feature is
-required for the production GCP ADC credential filter; production routing
-breaks without it. The build uses GitHub Actions cache to avoid rebuilding the
-Rust dependency graph on every push.
+This preserves the fork's required image capabilities after the upstream
+0.10 update. Upstream `full` excludes the opt-in OpenAI groups and stores, so
+those features must be explicit. The image also includes the automatically
+registered `enmaas-policy-filter` workspace crate. The build uses GitHub Actions
+cache to avoid rebuilding the Rust dependency graph on every push.
 
 ## Triggers and manual rebuilds
 
@@ -37,10 +38,11 @@ Rust dependency graph on every push.
   `:sha-<commit>` tags.
 - `workflow_dispatch` accepts an optional `commit` input. A manual rebuild
   tags only `:sha-<commit>`; it never moves `:main`.
-- Manual dispatch must run from `refs/heads/main`, and the selected commit
-  must be reachable from `main`. The workflow rejects other refs and commits
-  before checkout, so unreviewed branch code cannot use the Quay builder
-  credentials or write into `main`'s build-cache scope.
+- Manual dispatch selects a branch in this repository. The optional `commit`
+  must be a full lowercase SHA reachable from that branch's tip at dispatch
+  time. Tags and unrelated commits are rejected before the registry login.
+  Select `shaneutt/update-fork` to build an upstream-update candidate after
+  that branch has been reviewed and made available on GitHub.
 - The workflow is intended for branches in the canonical repository, where
   the Quay builder secrets are available. Do not expose those credentials to
   arbitrary fork code.
@@ -119,7 +121,7 @@ leaves, and otherwise on a regular schedule (at least every 90 days).
   commit, and the SBOM artifact name in the Actions run summary. That digest
   is the authoritative deployment reference.
 - Deploy by digest. Never deploy `:main`.
-- Promotion is explicit: build on `main`, validate the digest in staging, then
+- Promotion is explicit: build the selected branch, validate the digest in staging, then
   update the digest pin in the EnMaaS deployment configuration for staging and
   production.
 - Publishing is independent of the upstream Tests workflow, which runs
