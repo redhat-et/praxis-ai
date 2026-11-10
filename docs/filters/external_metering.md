@@ -24,11 +24,9 @@ When no `{prefix}model` identity header names the model and `model_to_provider` 
 | `fail_open` | bool | no | When `true` (default), requests proceed if the metering service is unavailable. When `false`, requests are rejected with 503. |
 | `identity_header_prefix` | string | no | Prefix for tenant identity headers to capture and strip. Expected headers: `{prefix}username`, `{prefix}group`, `{prefix}subscription`, `{prefix}model`, `{prefix}organization-id`, `{prefix}cost-center`. |
 | `identity_metadata_namespace` | string | no | Metadata namespace the `identity_header_guard` filter writes captured identity headers under. Must match that filter's `metadata_namespace` setting when both run in one pipeline. |
-| `internal_auth_file` | string | no | Optional file containing the bearer token used to authenticate gateway-to-metering subrequests. The file is read at pipeline build time and the token is never logged or put in the request body. |
 | `default_username` | string | no | Fallback username when no identity header is present. If set, requests without `{prefix}username` are still metered under this name. If unset, metering is skipped entirely. |
 | `default_model` | string | no | Fallback model name when no identity model header is present. |
-| `model_policy_check` | bool | no | Buffer the request body before the entitlement check so the public model ID can be included in the preflight. Enable when the metering service enforces per-user model allowlists. |
-| `model_policy_fail_open` | bool | no | Whether an unavailable metering service may bypass the model-policy decision. This is independent from `fail_open`, which controls the ordinary entitlement/budget check. |
+| `internal_auth_token` | CredentialSource | no | Optional internal bearer token for authenticating metering callouts (the balance check and the usage report). One of `value \| env_var \| file`, read through the shared [`CredentialSource`] core: bounded reads, restart-free file rotation (ideal for a Kubernetes projected Secret), and fail-closed publication. When omitted, callouts are sent unauthenticated (unchanged behavior). |
 
 ## Example
 
@@ -42,9 +40,6 @@ provider: "openai"
 fail_open: true
 identity_header_prefix: "x-tenant-"
 identity_metadata_namespace: "identity"
-internal_auth_file: "/etc/praxis-secrets/metering-token"
 default_username: "anonymous"
 default_model: "unknown"
-model_policy_check: false
-model_policy_fail_open: true
 ```

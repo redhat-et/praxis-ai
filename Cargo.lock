@@ -1482,7 +1482,7 @@ dependencies = [
 
 [[package]]
 name = "enmaas-policy-filter"
-version = "0.6.0"
+version = "0.10.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3651,7 +3651,6 @@ dependencies = [
  "dashmap",
  "futures",
  "http",
- "jsonwebtoken",
  "metrics",
  "metrics-util",
  "notify",
@@ -3665,11 +3664,13 @@ dependencies = [
  "rcgen",
  "redis",
  "reqwest",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "serde_json_canonicalizer",
  "serde_json_path",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "tempfile",
  "thiserror",
  "tiktoken-rs",

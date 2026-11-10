@@ -53,16 +53,15 @@ for how these are authored and regenerated.
 | [intelligent-route-mcp.yaml](configs/intelligent-route-mcp.yaml) | Routes MCP `tools/call` requests to the cluster that owns the requested tool, using the `mcp.name` metadata set by the `mcp` filter |
 | [intelligent-route-overlay.yaml](configs/intelligent-route-overlay.yaml) | Routes requests using a routing overlay file (`routing-overlay.json`) instead of inline YAML candidates.  The overlay is rendered by the operator into a Kubernetes ConfigMap and projected as a volume mount |
 | [intelligent-route-projected-credentials.yaml](configs/intelligent-route-projected-credentials.yaml) | Starts with an empty credential table and injects a provider credential that is resolved on demand from a projected Kubernetes Secret mount |
-| [intelligent-route-target-model.yaml](configs/intelligent-route-target-model.yaml) | The public model is promoted to X-Model, routed to a candidate, and then rewritten to the candidate's target_model before forwarding |
 | [json-rpc-routing.yaml](configs/json-rpc-routing.yaml) | Routes JSON-RPC 2.0 requests to different backends based on the "method" field in the JSON request body |
 | [lakera-guard.yaml](configs/lakera-guard.yaml) | Screens every request body through Lakera Guard for content moderation before forwarding to the upstream |
 | [llmd-ext-proc-routing.yaml](configs/llmd-ext-proc-routing.yaml) | A real llm-d EPP or test processor returns the trusted x-gateway-destination-endpoint header |
 | [llmisvc-model-provider-resolver.yaml](configs/llmisvc-model-provider-resolver.yaml) | Rewrites publisher-ID body `model` values to the short model name for LLMISvc / KServe routing; the routing header (default `X-Model`) is left unchanged so routing can still use the publisher ID |
 | [mcp-classifier-routing.yaml](configs/mcp-classifier-routing.yaml) | Routes MCP requests by body-derived method and tool name |
 | [mcp-stateless-broker.yaml](configs/mcp-stateless-broker.yaml) | Configurable stateless MCP broker using the final MCP 2026-07-28 stateless profile |
-| [model-catalog.yaml](configs/model-catalog.yaml) | Answers GET /v1/models from static configuration instead of forwarding it upstream |
 | [model-to-header-routing.yaml](configs/model-to-header-routing.yaml) | Routes LLM API requests to different backends based on the "model" field in the JSON request body |
-| [model-to-provider.yaml](configs/model-to-provider.yaml) | Map a stable public model ID to a provider route and provider-specific model |
+| [model-to-header-trust-existing.yaml](configs/model-to-header-trust-existing.yaml) | Routes on a model header that a trusted hop in front of Praxis has already set, skipping the filter entirely when the header is present |
+| [model-to-provider.yaml](configs/model-to-provider.yaml) | Map a stable public model ID to an existing upstream cluster and target model |
 | [nemo-guardrails-response.yaml](configs/nemo-guardrails-response.yaml) | Evaluates upstream responses against a NeMo Guardrails service |
 | [nemo-guardrails-service-account.yaml](configs/nemo-guardrails-service-account.yaml) | Sends the pod's service account token on Praxis's calls to NeMo, so kube-rbac-proxy can decide whether Praxis is allowed to call |
 | [nemo-guardrails.yaml](configs/nemo-guardrails.yaml) | Evaluates incoming requests against a NeMo Guardrails service |
@@ -72,7 +71,6 @@ for how these are authored and regenerated.
 | [project-state-owner-headers.yaml](configs/project-state-owner-headers.yaml) | Demonstrates the production boundary used when an external authenticator injects separate tenant and subject headers. `state_owner` consumes those assertions into an immutable internal owner and strips the inbound copies. `project_state_owner_headers` then recreates destination-specific headers from that normalized context |
 | [prompt-enrichment.yaml](configs/prompt-enrichment.yaml) | Injects system messages into OpenAI-compatible chat completion requests before forwarding to the upstream provider |
 | [provider-route.yaml](configs/provider-route.yaml) | This listener requires downstream mTLS. `peer_identity_trust` authenticates and authorizes the edge gateway before AI-owned x-ai-routing-* fields can influence provider-local routing |
-| [reject-upgrade.yaml](configs/reject-upgrade.yaml) | Refuses HTTP/1.1 connection-upgrade requests (e.g |
 | [stream-usage-inject.yaml](configs/stream-usage-inject.yaml) | Ensures every streaming OpenAI Chat Completions request carries stream_options.include_usage = true so the upstream response includes token usage in the final SSE event |
 | [time-to-first-token.yaml](configs/time-to-first-token.yaml) | Measures the elapsed time from request receipt to the first non-empty SSE body chunk and records a praxis_ai_ttft_seconds Prometheus histogram labeled by model |
 | [token-ceiling.yaml](configs/token-ceiling.yaml) | Place token_ceiling after any request translation or prompt enrichment so it evaluates the final provider-bound JSON body |
@@ -87,7 +85,7 @@ for how these are authored and regenerated.
 | [token-rate-limit-soft-tiers.yaml](configs/token-rate-limit-soft-tiers.yaml) | Extends token-rate-limit.yaml with graduated enforcement tiers (proposal S1, ai#881) |
 | [token-rate-limit.yaml](configs/token-rate-limit.yaml) | Reserves an estimated token cost at admission time and reconciles that reservation against actual provider-reported usage once the response completes |
 | [token-usage-headers.yaml](configs/token-usage-headers.yaml) | Inject Praxis-Token-Input, Praxis-Token-Output, and Praxis-Token-Total headers into downstream responses when token counts are available in filter metadata |
-| [vertex-anthropic.yaml](configs/vertex-anthropic.yaml) | Maps the public model ID `claude-sonnet-4-5` to the Vertex target, then rewrites Anthropic Messages requests into Vertex AI rawPredict form |
+| [token-usage-metrics.yaml](configs/token-usage-metrics.yaml) | Opt-in, cardinality-bounded per-tenant token counters |
 
 ### Anthropic
 

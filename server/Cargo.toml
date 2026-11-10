@@ -53,11 +53,10 @@ store-all = ["store-postgres", "store-sqlite"]
 openai-conversations = ["store", "praxis-ai-filters/openai-conversations"]
 openai-compact = ["store", "praxis-ai-filters/openai-compact"]
 openai-mcp-tools = ["store", "praxis-ai-filters/openai-mcp-tools"]
-# Every OpenAI group, without choosing a store backend.
-openai-all = ["openai-file-resolve-filter", "openai-conversations", "openai-compact", "openai-mcp-tools"]
-# Every non-experimental filter; equals the pre-feature-split capability.
-full = ["standard", "api-key-auth-filter", "openai-all", "store-postgres"]
-api-key-auth-filter = ["praxis-ai-filters/api-key-auth-filter"]
+# Every OpenAI group, including experimental capabilities, without a backend.
+openai-all = ["openai-agentic-loop", "openai-file-resolve-filter", "openai-conversations", "openai-compact", "openai-mcp-tools"]
+# Every non-experimental filter. Experimental OpenAI groups stay opt-in.
+full = ["standard"]
 # Experimental: the generic http_callout filter (see praxis-ai-filters).
 http-callout-filter = ["praxis-ai-filters/http-callout-filter", "experimental"]
 # Experimental: the azure_ad (Entra ID) auth filter (see praxis-ai-filters).
@@ -80,6 +79,8 @@ experimental = ["praxis-ai-filters/experimental"]
 opentelemetry = ["praxis-ai-filters/opentelemetry"]
 llmd-ext-proc = ["dep:praxis-ai-llmd-ext-proc"]
 praxis-main = ["praxis-ai-filters/praxis-main"]
+
+api-key-auth-filter = ["praxis-ai-filters/api-key-auth-filter"]
 
 [lints]
 workspace = true

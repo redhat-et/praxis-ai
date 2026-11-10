@@ -59,6 +59,9 @@ pub use gcp::GcpAdcFilter;
 pub use guardrails::AiGuardrailsFilter;
 pub use identity_guard::IdentityHeaderGuardFilter;
 pub use inference::{LlmisvcModelProviderResolverFilter, ModelToHeaderFilter, ModelToProviderFilter};
+pub use inflight::InFlightRegistry;
+#[cfg(feature = "inflight-tracker-filter")]
+pub use inflight::InFlightTrackerFilter;
 pub use metering::ExternalMeteringFilter;
 pub use model_access::ModelAccessFilter;
 pub use model_catalog::ModelCatalogFilter;

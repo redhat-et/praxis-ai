@@ -18,11 +18,14 @@ mod protocol;
 pub mod routes;
 mod web_search;
 mod wire;
-pub use messages_format::AnthropicMessagesFormatFilter;
+
+pub use messages_request::{AnthropicMessagesRequestFilter, AnthropicMessagesState};
 pub use messages_to_chat_completions::AnthropicMessagesToChatCompletionsFilter;
 pub use messages_to_chat_completions_stream::AnthropicMessagesToChatCompletionsStreamFilter;
 pub use openai_chat_completions_to_anthropic::OpenaiChatCompletionsToAnthropicFilter;
 pub use openai_chat_completions_to_anthropic_stream::OpenaiChatCompletionsToAnthropicStreamFilter;
 pub use protocol::AnthropicMessagesProtocolFilter;
 pub use web_search::AnthropicWebSearchFilter;
+#[cfg(feature = "vertex-anthropic")]
+pub(crate) use wire::error_rejection;
 pub(crate) use wire::{ErrorType, error_body, invalid_request_rejection};

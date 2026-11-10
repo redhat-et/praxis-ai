@@ -6,7 +6,8 @@
 use std::collections::HashMap;
 
 use praxis_test_utils::{
-    RoutedBackend, StatefulCapturingBackend, free_port, http_send, parse_body, parse_status, start_header_echo_backend,
+    Backend, RoutedBackend, StatefulCapturingBackend, StatefulCapturingGuard, free_port, http_send,
+    json_post_with_header, parse_body, parse_status, start_header_echo_backend,
 };
 
 // -----------------------------------------------------------------------------

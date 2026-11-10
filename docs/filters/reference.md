@@ -74,13 +74,6 @@ see the [Praxis core filter reference][core-ref].
 |--------|-------------|
 | [`anthropic_messages_to_vertexai_anthropic`](anthropic_messages_to_vertexai_anthropic.md) | Translates Anthropic Messages requests to Vertex AI `rawPredict` and Vertex responses back to the Anthropic dialect. |
 | [`openai_chat_completions_to_vertexai_gemini`](openai_chat_completions_to_vertexai_gemini.md) | Transforms OpenAI Chat Completions requests into Vertex AI Gemini `generateContent` format and translates responses back. |
-| [`vertex`](vertex.md) | Translates Anthropic Messages requests to Vertex AI `rawPredict` and Vertex responses back to the Anthropic dialect. |
-
-### Vertex
-
-| Filter | Description |
-|--------|-------------|
-| [`vertex`](vertex.md) | Translates Anthropic Messages requests to Vertex AI `rawPredict` and Vertex responses back to the Anthropic dialect. |
 
 ## Cross-Provider Filters (praxis-ai-filters)
 
@@ -90,12 +83,6 @@ see the [Praxis core filter reference][core-ref].
 |--------|-------------|
 | [`a2a`](a2a.md) | Extracts A2A protocol metadata from JSON-RPC request bodies and promotes method, family, task ID, streaming detection, and version to request headers, filter results, and durable metadata for routing. |
 | [`mcp`](mcp.md) | Extracts MCP protocol metadata from JSON-RPC request bodies and promotes method, tool/resource/prompt name, JSON-RPC kind, protocol version, and session presence to request headers/filter results; stores session ID in durable metadata. |
-
-### Api Key Auth
-
-| Filter | Description |
-|--------|-------------|
-| [`api_key_auth`](api_key_auth.md) | Validates API keys against an external service and injects verified identity into `filter_metadata`. |
 
 ### AWS
 
@@ -114,12 +101,6 @@ see the [Praxis core filter reference][core-ref].
 | Filter | Description |
 |--------|-------------|
 | [`http_callout`](http_callout.md) | Calls an external HTTP service during request processing and feeds its response into branch-chain evaluation. |
-
-### Content Normalize
-
-| Filter | Description |
-|--------|-------------|
-| [`content_normalize`](content_normalize.md) | Normalizes Anthropic content block types for vLLM/Qwen compatibility. |
 
 ### GCP
 
@@ -145,7 +126,13 @@ see the [Praxis core filter reference][core-ref].
 |--------|-------------|
 | [`llmisvc_model_provider_resolver`](llmisvc_model_provider_resolver.md) | Rewrites publisher-ID body `model` values to the short model name for `LLMISvc` / `KServe` routing; the routing header is left unchanged. |
 | [`model_to_header`](model_to_header.md) | Promotes the JSON `"model"` field from the request body to a request header. |
-| [`model_to_provider`](model_to_provider.md) | Maps stable client-facing model IDs to an internal provider selector and provider-specific target model. |
+| [`model_to_provider`](model_to_provider.md) | Maps stable client-facing model IDs to existing upstream clusters and provider-specific target models. |
+
+### Inflight
+
+| Filter | Description |
+|--------|-------------|
+| [`inflight_tracker`](inflight_tracker.md) | Tracks live request counts and reserved tokens per model. |
 
 ### Metering
 
@@ -153,35 +140,11 @@ see the [Praxis core filter reference][core-ref].
 |--------|-------------|
 | [`external_metering`](external_metering.md) | Integrates with an external metering service for pre-request balance checks and post-response token usage reporting. |
 
-### Model Access
-
-| Filter | Description |
-|--------|-------------|
-| [`model_access`](model_access.md) | Enforces model access control by checking the `model` field in the JSON request body against configured rules. |
-
-### Model Catalog
-
-| Filter | Description |
-|--------|-------------|
-| [`model_catalog`](model_catalog.md) | Serves a configured model list as a terminal response to `GET {path}`. |
-
 ### Prompt Enrich
 
 | Filter | Description |
 |--------|-------------|
 | [`prompt_enrich`](prompt_enrich.md) | Injects statically configured messages into the `messages` array of OpenAI-compatible chat completion request bodies. |
-
-### Reasoning Effort Map
-
-| Filter | Description |
-|--------|-------------|
-| [`reasoning_effort_map`](reasoning_effort_map.md) | Rewrites `reasoning_effort` / `reasoning.effort` for configured models so clients can send effort values the backend rejects. |
-
-### Reject Upgrade
-
-| Filter | Description |
-|--------|-------------|
-| [`reject_upgrade`](reject_upgrade.md) | Rejects connection-upgrade requests so they cannot bypass body-level filters. |
 
 ### Routing
 

@@ -357,10 +357,6 @@ pub(crate) struct OverlayCandidate {
     /// Trusted provider request path, present only on provider-aware candidates.
     #[serde(default)]
     pub(crate) path: Option<String>,
-
-    /// Trusted provider target model, present only on provider-aware candidates.
-    #[serde(default)]
-    pub(crate) target_model: Option<String>,
 }
 
 /// Default freshness for overlay candidates.
@@ -831,7 +827,11 @@ fn overlay_to_candidates(doc: &OverlayDocument, allow_empty: bool) -> Result<Vec
             Ok(CandidateConfig {
                 cluster: oc.cluster.clone(),
                 provider: oc.provider.clone(),
-                target_model: oc.target_model.clone(),
+                target_model: if oc.api_format.is_none() && oc.path.is_none() {
+                    oc.target_model.clone()
+                } else {
+                    None
+                },
                 paths: oc.paths.clone(),
                 catalog: oc.catalog.clone(),
                 display_name: oc.display_name.clone(),
@@ -931,6 +931,7 @@ fn enrich_provider_profile(
         overlay.target_model.as_deref(),
     ) {
         (None, None, None) => return Ok(()),
+        (None, None, Some(_)) if overlay.provider.is_some() || overlay.paths.is_some() => return Ok(()),
         (Some(api_format), Some(path), Some(target_model)) => (api_format, path, target_model),
         _ => {
             return Err(format!(

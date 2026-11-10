@@ -12,6 +12,57 @@ use super::*;
 use crate::test_utils::{make_filter_context, make_request};
 
 #[tokio::test]
+async fn legacy_provider_mapping_preserves_header_routing_and_public_model() {
+    let yaml = serde_yaml::from_str(
+        "models: [{model: public, provider: vertex, target_model: private, paths: [/v1/messages]}]",
+    )
+    .unwrap();
+    let filter = ModelToProviderFilter::from_config(&yaml).unwrap();
+    assert!(
+        !filter.selects_cluster(),
+        "legacy mappings leave cluster selection to the router"
+    );
+    assert!(matches!(
+        filter.request_body_mode(),
+        BodyMode::StreamBuffer { max_bytes: None }
+    ));
+    let request = make_request(Method::POST, "/v1/messages");
+    let mut ctx = make_filter_context(&request);
+    let mut body = Some(Bytes::from_static(br#"{"model":"public","messages":[]}"#));
+    drop(filter.on_request_body(&mut ctx, &mut body, true).await.unwrap());
+    assert_eq!(ctx.get_metadata(MODEL_PROVIDER_CLIENT_MODEL_METADATA), Some("public"));
+    assert!(
+        ctx.request_headers_to_set
+            .iter()
+            .any(|(name, value)| { name == "x-praxis-ai-provider" && value == "vertex" }),
+        "legacy provider selection must remain available to the router"
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(body.as_ref().unwrap()).unwrap()["model"],
+        "private"
+    );
+    assert!(ctx.cluster.is_none());
+}
+
+#[tokio::test]
+async fn legacy_explicit_body_limit_rejects_before_parsing() {
+    let yaml = serde_yaml::from_str(
+        "max_body_bytes: 32\nmodels: [{model: public, provider: vertex, target_model: private, paths: [/v1/messages]}]",
+    )
+    .unwrap();
+    let filter = ModelToProviderFilter::from_config(&yaml).unwrap();
+    let request = make_request(Method::POST, "/v1/messages");
+    let mut ctx = make_filter_context(&request);
+    let mut body = Some(Bytes::from(vec![b'x'; 33]));
+    assert!(matches!(
+        filter.on_request_body(&mut ctx, &mut body, true).await.unwrap(),
+        FilterAction::Reject(rejection) if rejection.status == 413
+    ));
+    assert!(ctx.request_headers_to_set.is_empty());
+    assert!(ctx.get_metadata(MODEL_PROVIDER_CLIENT_MODEL_METADATA).is_none());
+}
+
+#[tokio::test]
 async fn explicit_body_limit_rejects_before_parsing_invalid_json() {
     let yaml = serde_yaml::from_str("max_body_bytes: 32\nmodels: [{model: public, upstream: backend, target_model: private, paths: [/v1/messages]}]").unwrap();
     let filter = ModelToProviderFilter::from_config(&yaml).unwrap();
@@ -44,7 +95,7 @@ fn config_rejects_empty_duplicates_and_invalid_entries() {
         "models: [{model: claude, upstream: vertex, target_model: a, paths: []}]",
         "models: [{model: claude, upstream: vertex, target_model: a, paths: [relative/path]}]",
         "models: [{model: claude, upstream: vertex, target_model: a, paths: [/v1/messages, /v1/messages]}]",
-        "models: [{model: claude, provider: vertex, target_model: a, paths: [/v1/messages]}]",
+        "models: [{model: claude, provider: vertex, upstream: vertex, target_model: a, paths: [/v1/messages]}]",
     ] {
         let value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         assert!(

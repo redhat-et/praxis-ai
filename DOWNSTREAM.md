@@ -8,7 +8,7 @@ and credentials belong to
 ## Current upstream update
 
 The November 10 update integrates upstream main at
-[`7afa1699`](https://github.com/praxis-proxy/ai/commit/7afa1699e70bcd472d1db4c980b9177ca6f1d57c),
+[`b5218713`](https://github.com/praxis-proxy/ai/commit/b52187130cbc71d22a28493bad068e584772a4cb),
 with workspace version 0.10.0 and Praxis core 0.8.0. The local merge preserves
 both histories. Its content resolution uses upstream `75e8662d` as the
 effective baseline of the previous squash-based synchronization.

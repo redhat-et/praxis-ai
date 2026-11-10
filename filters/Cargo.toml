@@ -16,12 +16,23 @@ name = "praxis_ai_filters"
 default = ["standard"]
 # Default-on filters that sit behind a gate so minimal builds can drop them.
 standard = ["aws-sigv4-filter", "policy-engine"]
-# EnMaaS API-key authentication. Kept out of the lean standard graph because
-# its direct HTTP client is intentionally excluded from minimal builds.
-api-key-auth-filter = ["dep:reqwest", "dep:sha2"]
-# The `policy` filter from Praxis core. Kept explicit so no-default FIPS builds
-# can omit the policy engine and its pure-Rust cryptography.
-policy-engine = ["praxis-filter/policy-engine"]
+# The `policy` filter from Praxis core: the RustCrypto backend and every stable
+# builtin, named one by one because the `policy-builtins` bundle also carries
+# the experimental Limitador rate limiter and its tonic/prost graph. Kept
+# explicit so no-default FIPS builds can omit the engine and that cryptography.
+policy-engine = [
+    "praxis-filter/policy-crypto-default",
+    "praxis-filter/policy-api-key",
+    "praxis-filter/policy-jwt",
+    "praxis-filter/policy-oauth",
+    "praxis-filter/policy-cedar",
+    "praxis-filter/policy-cel",
+    "praxis-filter/policy-opa",
+    "praxis-filter/policy-valkey",
+    "praxis-filter/policy-delegator-vault",
+    "praxis-filter/policy-elicitation-ciba",
+    "praxis-filter/policy-secrets-vault",
+]
 # aws_sigv4_sign: AWS Signature V4 request signing. The signature is computed
 # over the system OpenSSL (praxis-ai-apis' hash seam); aws-sigv4 itself is a
 # dev-dependency, the oracle the signer is tested against.
@@ -42,10 +53,10 @@ store-all = ["store-postgres", "store-sqlite"]
 openai-conversations = ["store", "praxis-ai-apis/openai-conversations"]
 openai-compact = ["store", "praxis-ai-apis/openai-compact"]
 openai-mcp-tools = ["store", "praxis-ai-apis/openai-mcp-tools"]
-# Every OpenAI group, without choosing a store backend.
-openai-all = ["openai-file-resolve-filter", "openai-conversations", "openai-compact", "openai-mcp-tools"]
-# Every non-experimental filter; equals the pre-feature-split capability.
-full = ["standard", "api-key-auth-filter", "openai-all", "store-postgres"]
+# Every OpenAI group, including experimental capabilities, without a backend.
+openai-all = ["openai-agentic-loop", "openai-file-resolve-filter", "openai-conversations", "openai-compact", "openai-mcp-tools"]
+# Every non-experimental filter. Experimental OpenAI groups stay opt-in.
+full = ["standard"]
 # Experimental: the generic http_callout filter. Work in progress; the config
 # surface may change. Activates the `experimental` marker.
 http-callout-filter = ["experimental", "dep:serde_json_path"]
@@ -54,10 +65,12 @@ http-callout-filter = ["experimental", "dep:serde_json_path"]
 azure-ad-filter = ["experimental"]
 # Experimental: the gcp_adc (Application Default Credentials) upstream
 # authentication filter. Work in progress; the config surface may change.
-# Activates the `experimental` marker. `jsonwebtoken` signs the service-
-# account `JWT` assertion for `source: key_file`. `reqwest` stays
-# unconditional because the EnMaaS `api_key_auth` filter also uses it.
-gcp-adc-filter = ["experimental", "dep:jsonwebtoken"]
+# Activates the `experimental` marker. `openssl` signs the service-account
+# `JWT` assertion for `source: key_file` in the system library.
+gcp-adc-filter = ["experimental", "dep:openssl"]
+# Experimental: Anthropic Messages to Vertex AI rawPredict translation. Work
+# in progress; the config surface may change. Activates the experimental marker.
+vertex-anthropic-filter = ["experimental", "praxis-ai-apis/vertex-anthropic"]
 # Experimental: the token_rate_limit filter. Its parent proposal
 # (00121_token-rate-limiting in praxis-proxy/enhancements) is not yet
 # `accepted`, and open design questions remain (bucket-keying strategy,
@@ -82,6 +95,8 @@ inflight-tracker-filter = ["experimental"]
 experimental = ["praxis-ai-apis/experimental"]
 opentelemetry = []
 praxis-main = ["praxis-ai-apis/praxis-main"]
+
+api-key-auth-filter = ["dep:reqwest", "dep:sha2"]
 
 [lints]
 workspace = true
@@ -109,7 +124,6 @@ praxis-tls = { workspace = true }
 redis = { workspace = true, optional = true }
 rand = { workspace = true }
 reqwest = { workspace = true, optional = true }
-jsonwebtoken = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_json_canonicalizer = { workspace = true }

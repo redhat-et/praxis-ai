@@ -164,9 +164,17 @@ impl EventReporter {
                 headers,
                 body: Bytes::from(body),
             };
-            let result =
-                subrequest::execute_configured_url(&client, &url, request, MAX_RESPONSE_BYTES, timeout, address_policy)
-                    .await;
+            let result = client
+                .execute_url(
+                    &url,
+                    request,
+                    subrequest::address_policy_hook(address_policy),
+                    subrequest::UrlResolutionPolicy::OperatorCached,
+                    timeout,
+                    MAX_RESPONSE_BYTES,
+                    None,
+                )
+                .await;
             match result {
                 Ok(response) if (200..300).contains(&response.status) => {
                     trace!(status = response.status, "enmaas_policy: usage event sent");

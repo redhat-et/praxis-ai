@@ -36,8 +36,7 @@ use dashmap::DashMap;
 use http::{HeaderName, HeaderValue};
 use praxis_ai_apis::{MODEL_PROVIDER_CLIENT_MODEL_METADATA, MODEL_PROVIDER_HEADER, json_body::replace_json_body};
 use praxis_filter::{
-    BodyAccess, BodyMode, FilterAction, FilterError, HttpFilter, HttpFilterContext, Rejection,
-    body::DEFAULT_JSON_BODY_MAX_BYTES, parse_filter_config,
+    BodyAccess, BodyMode, FilterAction, FilterError, HttpFilter, HttpFilterContext, Rejection, parse_filter_config,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -45,8 +44,9 @@ use serde_json::Value;
 use super::{
     descriptor::{self, AdmissionState, CandidateConfig, CapabilityKind, RouteCandidate},
     metadata::{
-        OVERLAY_REVISION_HEADER, PROVIDER_HOP_REQUEST_ID_HEADER, ROUTE_ADMISSION_STATE, ROUTE_CLUSTER, ROUTE_KIND,
-        ROUTE_LOCAL_SITE, ROUTE_NAME, ROUTE_PROVIDER_HOP_REQUEST_ID, ROUTE_RANK, ROUTE_SELECTION_GROUP,
+        OVERLAY_REVISION_HEADER, PROVIDER_HOP_REQUEST_ID_HEADER, ROUTE_ADMISSION_STATE, ROUTE_API_FORMAT,
+        ROUTE_CANDIDATE_COUNT, ROUTE_CLUSTER, ROUTE_KIND, ROUTE_LOCAL_SITE, ROUTE_NAME, ROUTE_OUTCOME,
+        ROUTE_OVERLAY_REVISION, ROUTE_PATH, ROUTE_PROVIDER_HOP_REQUEST_ID, ROUTE_RANK, ROUTE_SELECTION_GROUP,
         ROUTE_SELECTION_MODE, ROUTE_SELECTION_TIER, ROUTE_SITE, ROUTE_STABLE_ID, ROUTE_TARGET_MODEL,
         ROUTE_TARGET_PATHS, SELECTED_CANDIDATE_HEADER, set_credential_metadata,
     },
@@ -703,6 +703,9 @@ impl IntelligentRouteFilter {
         ctx: &mut HttpFilterContext<'_>,
         body: &mut Option<Bytes>,
     ) -> Result<(), FilterError> {
+        if ctx.get_metadata(ROUTE_API_FORMAT).is_some() {
+            return Ok(());
+        }
         let Some(raw) = body.as_ref() else {
             return Ok(());
         };
@@ -1069,6 +1072,18 @@ fn validate_session_affinity_config(cfg: &SessionAffinityConfig) -> Result<(), F
 #[expect(clippy::too_many_lines, reason = "ordered request-phase routing guards")]
 #[async_trait]
 impl HttpFilter for IntelligentRouteFilter {
+    fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadWrite
+    }
+
+    fn request_body_mode(&self) -> BodyMode {
+        BodyMode::StreamBuffer { max_bytes: None }
+    }
+
+    fn needs_request_context(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &'static str {
         "intelligent_route"
     }
@@ -1083,18 +1098,15 @@ impl HttpFilter for IntelligentRouteFilter {
         true
     }
 
-    fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
-    }
-
-    fn request_body_mode(&self) -> BodyMode {
-        BodyMode::StreamBuffer {
-            max_bytes: Some(DEFAULT_JSON_BODY_MAX_BYTES),
-        }
-    }
-
-    fn needs_request_context(&self) -> bool {
-        true
+    /// The clusters pipeline validation checks against the `load_balancer`.
+    ///
+    /// A configured `clusters` list is authoritative. Without one, static
+    /// candidates are reported because they live in the same configuration,
+    /// but overlay candidates are not: an overlay revision the running
+    /// gateway accepted must not be able to fail the next restart. The
+    /// `management_cluster` is always included.
+    fn selected_clusters(&self) -> Vec<String> {
+        self.reported_clusters.clone()
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -1576,6 +1588,14 @@ fn record_route_decision(
         && let Ok(provider) = HeaderValue::from_str(provider.as_ref())
     {
         ctx.request_headers_to_set.push((PROVIDER_HEADER.clone(), provider));
+    }
+    if let Some(profile) = &candidate.provider_profile {
+        ctx.set_metadata(ROUTE_API_FORMAT, profile.api_format.as_str());
+        ctx.set_metadata(ROUTE_PATH, profile.path.as_ref());
+        ctx.set_metadata(ROUTE_TARGET_MODEL, profile.target_model.as_ref());
+    }
+    if let Some(revision) = semantic_revision {
+        ctx.set_metadata(ROUTE_OVERLAY_REVISION, revision.as_ref());
     }
     if let Some(rank) = candidate.rank {
         ctx.set_metadata(ROUTE_RANK, rank.to_string());

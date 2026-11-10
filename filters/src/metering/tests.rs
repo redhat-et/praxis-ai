@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-use http::HeaderValue;
+use std::fs;
+
+use http::{HeaderName, HeaderValue};
 use serde_json::json;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -72,8 +74,8 @@ async fn unavailable_model_policy_can_fail_closed_independently() {
     assert!(matches!(action, FilterAction::Reject(rejection) if rejection.status == 403));
 }
 
-#[test]
-fn config_loads_internal_auth_token_from_file() {
+#[tokio::test]
+async fn config_loads_internal_auth_token_from_file() {
     let path = std::env::temp_dir().join(format!("praxis-metering-token-{}", std::process::id()));
     fs::write(&path, "metering-secret\n").unwrap();
     let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
@@ -84,31 +86,53 @@ fn config_loads_internal_auth_token_from_file() {
 
     let filter = build_filter(&yaml).unwrap();
     assert_eq!(
-        filter.internal_auth_token.as_ref().unwrap().to_str().unwrap(),
+        filter.balance_callout_headers(filter.auth_header()).unwrap()["authorization"],
         "Bearer metering-secret"
     );
     fs::remove_file(path).unwrap();
 }
 
-#[test]
-fn internal_auth_token_rejects_empty_and_whitespace_values() {
+#[tokio::test]
+async fn internal_auth_token_rejects_empty_and_whitespace_values() {
     for (suffix, content) in [("empty", ""), ("whitespace", "token with-space")] {
         let path = std::env::temp_dir().join(format!("praxis-metering-token-{suffix}-{}", std::process::id()));
         fs::write(&path, content).unwrap();
-        let result = read_internal_auth_token(path.to_str().unwrap());
+        let yaml = serde_yaml::from_str(&format!(
+            "metering_url: http://metering:8080\ninternal_auth_file: {:?}\n",
+            path.to_string_lossy()
+        ))
+        .unwrap();
+        let result = build_filter(&yaml);
         assert!(result.is_err(), "{suffix} token must fail closed");
         fs::remove_file(path).unwrap();
     }
 }
 
-#[test]
-fn internal_auth_headers_build_bearer_header() {
+#[tokio::test]
+async fn internal_auth_headers_build_bearer_header() {
     let path = std::env::temp_dir().join(format!("praxis-metering-token-header-{}", std::process::id()));
     fs::write(&path, "metering-secret").unwrap();
-    let token = read_internal_auth_token(path.to_str().unwrap()).unwrap();
-    let headers = internal_auth_headers(Some(&token));
+    let yaml = serde_yaml::from_str(&format!(
+        "metering_url: http://metering:8080\ninternal_auth_file: {:?}\n",
+        path.to_string_lossy()
+    ))
+    .unwrap();
+    let filter = build_filter(&yaml).unwrap();
+    let headers = filter.balance_callout_headers(filter.auth_header()).unwrap();
     assert_eq!(headers.get("authorization").unwrap(), "Bearer metering-secret");
     fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn internal_auth_sources_cannot_be_combined() {
+    let yaml = serde_yaml::from_str(
+        "metering_url: http://metering:8080\ninternal_auth_file: /unused\ninternal_auth_token: {value: unused}\n",
+    )
+    .unwrap();
+    assert!(
+        build_filter(&yaml).is_err(),
+        "ambiguous credential sources must fail at startup"
+    );
 }
 
 #[tokio::test]
@@ -152,12 +176,10 @@ async fn internal_auth_is_sent_on_entitlement_and_event_subrequests() {
     let event = build_usage_event(&event_ctx("event-1", &state), &tokens);
     spawn_usage_report(
         filter.subrequest_client.clone(),
-        MeteringReportConfig {
-            url: format!("{}/api/v1/events", server.uri()),
-            timeout: filter.timeout,
-            address_policy: filter.address_policy,
-            internal_auth_token: filter.internal_auth_token.clone(),
-        },
+        &server.uri(),
+        filter.timeout,
+        filter.address_policy,
+        filter.balance_callout_headers(filter.auth_header()).unwrap(),
         &event,
     );
 
@@ -374,6 +396,17 @@ fn provider_resolved_public_model_wins_over_rewritten_body_model() {
     let state = state_for("alice", "");
 
     assert_eq!(filter.resolve_report_model(&ctx, &state), "claude-sonnet-4-5");
+}
+
+#[test]
+fn provider_resolved_model_does_not_override_captured_identity_model() {
+    let filter = filter_from_yaml("metering_url: \"http://metering:8080\"\n");
+    let req = make_request(http::Method::POST, "/v1/messages");
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata(MODEL_PROVIDER_CLIENT_MODEL_METADATA, "claude-sonnet-4-5");
+    let state = state_for("alice", "tenant-model");
+
+    assert_eq!(filter.resolve_report_model(&ctx, &state), "tenant-model");
 }
 
 #[tokio::test]

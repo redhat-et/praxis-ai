@@ -165,6 +165,7 @@ mod provider_route;
 #[cfg(feature = "store-sqlite")]
 mod rehydrate;
 mod reject_upgrade;
+#[cfg(feature = "openai-responses")]
 mod responses_routing;
 #[cfg(all(
     feature = "openai-agentic-loop",
@@ -189,8 +190,11 @@ mod token_rate_limit_sentinel;
 mod token_usage_headers;
 mod token_usage_metrics;
 mod vector_stores_routing;
+#[cfg(feature = "vertex-anthropic-filter")]
 mod vertex_anthropic;
 mod vertex_gemini;
+mod vertex_legacy;
+#[cfg(feature = "openai-responses")]
 mod vllm_agentic_api;
 #[cfg(feature = "openai-responses")]
 mod web_search;

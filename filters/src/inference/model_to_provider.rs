@@ -168,6 +168,15 @@ impl ModelToProviderFilter {
     /// assert_eq!(filter.name(), "model_to_provider");
     /// ```
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
+        // Deployed fork pipelines route on the provider header. Keep their
+        // configuration distinct from upstream's direct cluster selection.
+        if config
+            .get("models")
+            .and_then(serde_yaml::Value::as_sequence)
+            .is_some_and(|models| models.iter().any(|model| model.get("provider").is_some()))
+        {
+            return legacy::ModelToProviderFilter::from_config(config);
+        }
         let config: ModelToProviderConfig = parse_filter_config("model_to_provider", config)?;
         if config.models.is_empty() || config.models.len() > MAX_MODEL_MAPPINGS {
             return Err(format!("model_to_provider: models must contain 1-{MAX_MODEL_MAPPINGS} mappings").into());
@@ -371,6 +380,8 @@ impl HttpFilter for ModelToProviderFilter {
         Ok(FilterAction::Continue)
     }
 }
+
+mod legacy;
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]

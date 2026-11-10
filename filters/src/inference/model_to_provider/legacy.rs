@@ -19,6 +19,7 @@
     clippy::panic,
     reason = "tests"
 )]
+#[path = "legacy_tests.rs"]
 mod tests;
 
 use std::collections::HashMap;
@@ -28,7 +29,7 @@ use bytes::Bytes;
 use http::{HeaderName, HeaderValue};
 use praxis_ai_apis::{MODEL_PROVIDER_CLIENT_MODEL_METADATA, MODEL_PROVIDER_HEADER, json_body::replace_json_body};
 use praxis_filter::{
-    BodyAccess, BodyMode, FilterAction, FilterError, HttpFilter, HttpFilterContext, body::DEFAULT_JSON_BODY_MAX_BYTES,
+    BodyAccess, BodyMode, FilterAction, FilterError, HttpFilter, HttpFilterContext, Rejection,
     builtins::http::payload_processing::config_validation::validate_max_body_bytes, parse_filter_config,
 };
 use serde::Deserialize;
@@ -59,8 +60,8 @@ struct ModelToProviderConfig {
     /// Exact client-facing model mappings.
     models: Vec<ModelProviderMappingConfig>,
     /// Maximum JSON request body buffered to inspect the model field.
-    #[serde(default = "default_max_body_bytes")]
-    max_body_bytes: usize,
+    #[serde(default)]
+    max_body_bytes: Option<usize>,
 }
 
 /// One public-model to provider mapping.
@@ -111,7 +112,7 @@ pub struct ModelToProviderFilter {
     /// Exact public model ID to provider mapping table.
     models: HashMap<String, ModelProviderMapping>,
     /// Maximum buffered request body size.
-    max_body_bytes: usize,
+    max_body_bytes: Option<usize>,
 }
 
 impl ModelToProviderFilter {
@@ -126,7 +127,9 @@ impl ModelToProviderFilter {
         if config.models.is_empty() || config.models.len() > MAX_MODEL_MAPPINGS {
             return Err(format!("model_to_provider: models must contain 1-{MAX_MODEL_MAPPINGS} mappings").into());
         }
-        validate_max_body_bytes("model_to_provider", config.max_body_bytes)?;
+        if let Some(limit) = config.max_body_bytes {
+            validate_max_body_bytes("model_to_provider", limit)?;
+        }
         Ok(Box::new(Self {
             models: build_model_mappings(config.models)?,
             max_body_bytes: config.max_body_bytes,
@@ -185,11 +188,6 @@ fn validate_mapping_paths(model: &str, paths: Vec<String>) -> Result<Vec<String>
     Ok(validated)
 }
 
-/// Default request body limit shared with JSON body filters.
-fn default_max_body_bytes() -> usize {
-    DEFAULT_JSON_BODY_MAX_BYTES
-}
-
 /// Validate a public model, provider ID, or provider target model.
 fn validate_mapping_value(field: &str, value: &str) -> Result<(), FilterError> {
     if value.trim().is_empty() || value.len() > MAX_MAPPING_VALUE_LEN || value.chars().any(char::is_control) {
@@ -212,9 +210,7 @@ impl HttpFilter for ModelToProviderFilter {
     }
 
     fn request_body_mode(&self) -> BodyMode {
-        BodyMode::StreamBuffer {
-            max_bytes: Some(self.max_body_bytes),
-        }
+        BodyMode::StreamBuffer { max_bytes: None }
     }
 
     fn needs_request_context(&self) -> bool {
@@ -237,6 +233,12 @@ impl HttpFilter for ModelToProviderFilter {
     ) -> Result<FilterAction, FilterError> {
         if !end_of_stream {
             return Ok(FilterAction::Continue);
+        }
+        if self
+            .max_body_bytes
+            .is_some_and(|limit| body.as_ref().is_some_and(|raw| raw.len() > limit))
+        {
+            return Ok(FilterAction::Reject(Rejection::status(413)));
         }
         let Some(raw) = body.as_ref() else {
             return Ok(FilterAction::Continue);

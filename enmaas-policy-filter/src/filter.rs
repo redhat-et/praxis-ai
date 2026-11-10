@@ -280,16 +280,20 @@ impl EnmaasPolicyFilter {
         };
 
         let started = Instant::now();
-        let response: SubResponse = subrequest::execute_configured_url(
-            &self.client,
-            &url,
-            request,
-            MAX_POLICY_RESPONSE_BYTES,
-            self.config.timeout(),
-            self.address_policy,
-        )
-        .await
-        .map_err(|error| describe_subrequest_error(&error))?;
+        let response: SubResponse = self
+            .client
+            .execute_url(
+                &url,
+                request,
+                subrequest::address_policy_hook(self.address_policy),
+                subrequest::UrlResolutionPolicy::OperatorCached,
+                self.config.timeout(),
+                MAX_POLICY_RESPONSE_BYTES,
+                None,
+            )
+            .await
+            .map_err(subrequest::map_url_error)
+            .map_err(|error| describe_subrequest_error(&error))?;
         histogram!("enmaas_policy_callout_duration_seconds").record(started.elapsed().as_secs_f64());
         histogram!("enmaas_policy_metering_duration_seconds").record(started.elapsed().as_secs_f64());
 

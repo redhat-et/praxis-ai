@@ -115,6 +115,14 @@ pub(super) struct ExternalMeteringConfig {
     /// ordinary entitlement/budget check.
     #[serde(default = "default_true")]
     pub model_policy_fail_open: bool,
+    /// Optional internal bearer token for authenticating metering callouts
+    /// (the balance check and the usage report). One of `value | env_var |
+    /// file`, read through the shared [`CredentialSource`] core: bounded reads,
+    /// restart-free file rotation (ideal for a Kubernetes projected Secret),
+    /// and fail-closed publication. When omitted, callouts are sent
+    /// unauthenticated (unchanged behavior).
+    #[serde(default)]
+    pub internal_auth_token: Option<CredentialSource>,
 }
 
 /// Validate config at construction time.
