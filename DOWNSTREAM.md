@@ -7,11 +7,16 @@ and credentials belong to
 
 ## Current upstream update
 
-The November 10 update integrates upstream main at
-[`b5218713`](https://github.com/praxis-proxy/ai/commit/b52187130cbc71d22a28493bad068e584772a4cb),
-with workspace version 0.10.0 and Praxis core 0.8.0. The local merge preserves
-both histories. Its content resolution uses upstream `75e8662d` as the
-effective baseline of the previous squash-based synchronization.
+The November 12 update bases the downstream patch stack on upstream main at
+[`56dc39a2`](https://github.com/praxis-proxy/ai/commit/56dc39a25d7f44da0467c28f0e85bfa4ca220130),
+with workspace version 0.10.0 and Praxis core 0.8.0. Downstream commits are
+replayed in a linear history with their original author names, emails, and
+author dates. Each replay records its source in an `Original-commit` trailer.
+Changes already supplied by upstream are omitted; the mixed synchronization
+commit's downstream contribution is extracted relative to upstream `75e8662d`.
+Integration adjustments and gate repairs remain separate commits. Fixture
+additions stay with their originating feature commit; subsequent integration
+and repair commits preserve upstream coverage instead of rewriting it.
 
 Step one is updating the fork and producing branch images with the required
 behavior preserved. Step two is retiring custom implementations through
