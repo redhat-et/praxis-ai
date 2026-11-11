@@ -71,6 +71,14 @@ const MAX_TTL_SECS: u64 = 86_400;
 /// Internal provider marker retained for provider-specific path rewrites.
 const PROVIDER_HEADER: HeaderName = HeaderName::from_static(MODEL_PROVIDER_HEADER);
 
+/// This filter's body-phase selection, retained only while its cluster is active.
+struct BodyRouteSelection {
+    /// Cluster identity that still owns this selection.
+    cluster: Arc<str>,
+    /// Bounded routing headers to restore after request-phase sanitization.
+    headers: Vec<(HeaderName, HeaderValue)>,
+}
+
 /// Maximum number of configured management-path skip prefixes.
 const MAX_SKIP_PATHS: usize = 64;
 
@@ -703,10 +711,7 @@ impl IntelligentRouteFilter {
         ctx: &mut HttpFilterContext<'_>,
         body: &mut Option<Bytes>,
     ) -> Result<(), FilterError> {
-        if ctx.get_metadata(ROUTE_API_FORMAT).is_some() {
-            return Ok(());
-        }
-        let Some(raw) = body.as_ref() else {
+        let (Some(raw), None) = (body.as_ref(), ctx.get_metadata(ROUTE_API_FORMAT)) else {
             return Ok(());
         };
         let Some(target_model) = ctx.get_metadata(ROUTE_TARGET_MODEL).map(str::to_owned) else {
@@ -1121,6 +1126,13 @@ impl HttpFilter for IntelligentRouteFilter {
             .push(HeaderName::from_static(OVERLAY_REVISION_HEADER));
         ctx.request_headers_to_remove.push(PROVIDER_HEADER.clone());
 
+        if let Some(selected) = ctx.remove_filter_state::<BodyRouteSelection>()
+            && ctx.cluster.as_deref() == Some(selected.cluster.as_ref())
+        {
+            ctx.request_headers_to_set.extend(selected.headers);
+            return Ok(FilterAction::Continue);
+        }
+
         // Management and discovery endpoints bypass model resolution entirely.
         if let Some(action) = self.try_management_skip(ctx) {
             record_outcome(ctx, DecisionOutcome::Management, None);
@@ -1171,6 +1183,7 @@ impl HttpFilter for IntelligentRouteFilter {
             return Ok(FilterAction::Continue);
         }
         let snap = self.snapshot.load();
+        let header_start = ctx.request_headers_to_set.len();
         let (action, kind) = if ctx.cluster.is_some() {
             (FilterAction::Continue, None)
         } else {
@@ -1190,6 +1203,19 @@ impl HttpFilter for IntelligentRouteFilter {
         };
         let inference_route = kind == Some(CapabilityKind::InferenceModel)
             || ctx.get_metadata(ROUTE_KIND) == Some(CapabilityKind::InferenceModel.as_str());
+        if matches!(action, FilterAction::Continue)
+            && kind.is_some()
+            && let Some(cluster) = &ctx.cluster
+        {
+            // Both phases need these bounded routing headers. Retain shared
+            // header values so request sanitization can restore our selection;
+            // another filter changing the cluster invalidates this handoff.
+            let selected = BodyRouteSelection {
+                cluster: Arc::clone(cluster),
+                headers: ctx.request_headers_to_set.iter().skip(header_start).cloned().collect(),
+            };
+            ctx.insert_filter_state(selected);
+        }
         if matches!(action, FilterAction::Continue) && inference_route {
             self.rewrite_selected_model(ctx, body)?;
         }
@@ -1559,8 +1585,8 @@ fn record_selection_metadata(ctx: &mut HttpFilterContext<'_>, group: Option<u32>
 /// Write bounded route-decision metadata on successful selection.
 ///
 /// Keys use `intelligent_route.` namespace. All values are bounded by the
-/// existing `set_metadata` limits.  No HTTP forwarding headers are
-/// written by this function.
+/// existing `set_metadata` limits. Legacy provider mappings also project
+/// their trusted selector header for the downstream router.
 fn record_route_decision(
     ctx: &mut HttpFilterContext<'_>,
     local_site: &Arc<str>,
@@ -1574,21 +1600,7 @@ fn record_route_decision(
     ctx.set_metadata(ROUTE_NAME, &*candidate.name);
     ctx.set_metadata(ROUTE_SITE, &*candidate.site);
     ctx.set_metadata(ROUTE_STABLE_ID, &*candidate.stable_id);
-    if let Some(target_model) = &candidate.target_model {
-        ctx.set_metadata(ROUTE_TARGET_MODEL, target_model.as_ref());
-        if let Some(paths) = &candidate.paths {
-            ctx.set_metadata(
-                ROUTE_TARGET_PATHS,
-                paths.iter().map(AsRef::as_ref).collect::<Vec<_>>().join(","),
-            );
-        }
-    }
-    if candidate.kind == CapabilityKind::InferenceModel
-        && let Some(provider) = &candidate.provider
-        && let Ok(provider) = HeaderValue::from_str(provider.as_ref())
-    {
-        ctx.request_headers_to_set.push((PROVIDER_HEADER.clone(), provider));
-    }
+    record_legacy_provider_route(ctx, candidate);
     if let Some(profile) = &candidate.provider_profile {
         ctx.set_metadata(ROUTE_API_FORMAT, profile.api_format.as_str());
         ctx.set_metadata(ROUTE_PATH, profile.path.as_ref());
@@ -1604,6 +1616,25 @@ fn record_route_decision(
         ctx.set_metadata(ROUTE_SELECTION_TIER, &**tier);
     }
     set_credential_metadata(ctx, candidate.credential.as_ref());
+}
+
+/// Preserve the fork's target-model metadata and header-based provider routing.
+fn record_legacy_provider_route(ctx: &mut HttpFilterContext<'_>, candidate: &RouteCandidate) {
+    if let Some(target_model) = &candidate.target_model {
+        ctx.set_metadata(ROUTE_TARGET_MODEL, target_model.as_ref());
+        if let Some(paths) = &candidate.paths {
+            ctx.set_metadata(
+                ROUTE_TARGET_PATHS,
+                paths.iter().map(AsRef::as_ref).collect::<Vec<_>>().join(","),
+            );
+        }
+    }
+    if candidate.kind == CapabilityKind::InferenceModel
+        && let Some(provider) = &candidate.provider
+        && let Ok(provider) = HeaderValue::from_str(provider.as_ref())
+    {
+        ctx.request_headers_to_set.push((PROVIDER_HEADER.clone(), provider));
+    }
 }
 
 /// Emit the minimal AI-owned edge-to-provider context.
@@ -2570,6 +2601,39 @@ mod tests {
         let _unused = f.on_request(&mut ctx).await.unwrap();
         assert_eq!(ctx.get_metadata("intelligent_route.cluster"), Some("local-inf"));
         assert_eq!(ctx.get_metadata("intelligent_route.local_site"), Some("site-a"));
+    }
+
+    #[tokio::test]
+    async fn body_routing_retains_selection_outcome_in_request_phase() {
+        let filter = make_filter(&[("inference_model", "llama", "site-a", "local-inf")]);
+        let request = crate::test_utils::make_request(Method::POST, "/v1/chat/completions");
+        let mut ctx = crate::test_utils::make_filter_context(&request);
+        ctx.current_filter_id = Some(0);
+        let mut body = Some(Bytes::from_static(br#"{"model":"llama","messages":[]}"#));
+
+        drop(filter.on_request_body(&mut ctx, &mut body, true).await.unwrap());
+        assert_eq!(ctx.get_metadata(ROUTE_OUTCOME), Some("routed"));
+        drop(filter.on_request(&mut ctx).await.unwrap());
+
+        assert_eq!(ctx.cluster.as_deref(), Some("local-inf"));
+        assert_eq!(ctx.get_metadata(ROUTE_OUTCOME), Some("routed"));
+        assert_eq!(ctx.get_metadata(ROUTE_NAME), Some("llama"));
+    }
+
+    #[tokio::test]
+    async fn body_selection_is_invalidated_when_another_filter_changes_cluster() {
+        let filter = make_filter(&[("inference_model", "llama", "site-a", "local-inf")]);
+        let request = crate::test_utils::make_request(Method::POST, "/v1/chat/completions");
+        let mut ctx = crate::test_utils::make_filter_context(&request);
+        ctx.current_filter_id = Some(0);
+        let mut body = Some(Bytes::from_static(br#"{"model":"llama","messages":[]}"#));
+
+        drop(filter.on_request_body(&mut ctx, &mut body, true).await.unwrap());
+        ctx.cluster = Some(Arc::from("other-filter-cluster"));
+        drop(filter.on_request(&mut ctx).await.unwrap());
+
+        assert_eq!(ctx.cluster.as_deref(), Some("other-filter-cluster"));
+        assert_eq!(ctx.get_metadata(ROUTE_OUTCOME), Some("preserved"));
     }
 
     #[tokio::test]
@@ -4255,6 +4319,7 @@ mod tests {
     fn dropping_the_serving_instance_clears_the_snapshot_gauge() {
         let ((), snapshot) = metrics_emitted_by(async {
             let serving = IntelligentRouteFilter {
+                body_authoritative: false,
                 model_header: HeaderName::from_static("x-model"),
                 _reload_handle: None,
                 skip_paths: Vec::new(),

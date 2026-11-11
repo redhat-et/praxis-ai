@@ -1,8 +1,14 @@
-#![allow(
-    clippy::missing_docs_in_private_items,
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Praxis Contributors
+
+#![expect(
     clippy::significant_drop_tightening,
     clippy::too_many_lines,
     reason = "private bucket internals"
+)]
+#![cfg_attr(
+    not(test),
+    expect(clippy::missing_docs_in_private_items, reason = "retained private policy internals")
 )]
 
 use std::{

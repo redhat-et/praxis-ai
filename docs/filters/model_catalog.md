@@ -15,7 +15,7 @@ Discovery only: it advertises what the gateway exposes. Authorization is owned b
 |-------|------|---------|-------------|
 | `format` | `openai` \| `anthropic` | no | Response envelope dialect: `openai` or `anthropic`. |
 | `path` | string | no | Request path served by the catalog, matched exactly on `GET`. |
-| `models` | ModelEntry[] | no | Advertised models, in declaration order. Mutually exclusive with `overlay_file`. |
+| `models` | object[] | no | Advertised models, in declaration order. Mutually exclusive with `overlay_file`. |
 | `models[].id` | string | yes | Model identifier returned to clients and used in requests. |
 | `models[].owned_by` | string | no | Owner shown in the OpenAI envelope's `owned_by` field. |
 | `models[].display_name` | string | no | Human-readable name shown in the Anthropic envelope's `display_name` field. Defaults to [`ModelEntry::id`] when absent. |

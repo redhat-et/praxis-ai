@@ -94,8 +94,18 @@ insecure_options:
 ```
 
 `model_to_header` derives the model from the request body and removes a
-client-supplied copy of its configured header. `intelligent_route` itself reads
-the promoted header; it does not parse the body. See [model extraction].
+client-supplied copy of its configured header. See [model extraction].
+
+This fork also retains body-based inference routing. With `body_authoritative:
+true`, inference selection waits for the body, so a raw client model header
+cannot select the backend first. With the default `false`, header lookup remains
+available and the body supplies a fallback when no lookup is present. MCP tool
+lookup keeps its existing precedence. The request buffer inherits the pipeline's
+`max_request_bytes` and `max_buffer_bytes` limits.
+
+A selection made during body pre-read keeps its routing outcome in the request
+phase while its selected cluster remains active. This lets downstream provider
+adapters validate the same request-scoped selection.
 
 ### Overlay configuration
 
@@ -136,18 +146,18 @@ Lookup happens in this order:
 2. An upstream cluster selected by an earlier filter is preserved.
 3. If `mcp.method` metadata exists, MCP lookup takes precedence over the model
    header. Only `tools/call` routes; it requires a valid `mcp.name`.
-4. Otherwise, the filter reads `model_header` and matches `inference_model`
-   candidates by name.
+4. Otherwise, the filter resolves the model using the header or body rules above
+   and matches `inference_model` candidates by name.
 
 Names are matched exactly. Model and tool names must be nonblank and at most
-256 bytes. A missing model header skips routing; a present invalid value rejects
-the request. Non-tool MCP messages skip routing even if a model header exists.
+256 bytes. Missing model information skips routing; a present invalid header
+rejects the request. Non-tool MCP messages skip routing even if a model header exists.
 
 | Request condition | Outcome | Action |
 | --- | --- | --- |
 | Management path | `management` | Continue, optionally using `management_cluster` |
 | Cluster already selected | `preserved` | Continue with that cluster |
-| Missing model header or non-tool MCP method | `skipped` | Continue without selecting a cluster |
+| Missing model information or non-tool MCP method | `skipped` | Continue without selecting a cluster |
 | Invalid model header or invalid/missing MCP tool name | `invalid` | HTTP 400 |
 | Eligible session binding | `reused` | Continue with the bound candidate |
 | Eligible fresh selection | `routed` | Continue with the selected candidate |
@@ -657,6 +667,12 @@ requires an `apikey` credential reference. The filter publishes the profile as
 metadata, and downstream adapters such as the [Anthropic request converter]
 perform the transformation.
 
+The fork's legacy candidate fields remain available: `provider` sets the trusted
+`x-praxis-ai-provider` selector, while `target_model` with optional `paths` rewrites
+the body model and retains the public model for accounting. These legacy fields
+can be used on static candidates. A versioned provider profile supplies the
+modern transformation contract; its adapter owns the model rewrite.
+
 For routing through another Praxis gateway, list only the clusters that terminate
 the authenticated provider-hop protocol in `provider_hop_clusters`. The filter
 removes client-supplied routing-context headers on every request. For an
@@ -683,6 +699,7 @@ The configuration rejects unknown fields.
 | `candidates` | Unset | Static candidate array; mutually exclusive with `overlay_file` |
 | `local_site` | Unset | Required in static mode; overlay supplies it in overlay mode |
 | `model_header` | `X-Model` | Promoted request header containing the inference model |
+| `body_authoritative` | `false` | Resolve inference routing from the body instead of a raw client model header |
 | `clusters` | Unset | Authoritative allowlist of downstream load-balancer cluster names |
 | `overlay_file` | Unset | Overlay file path; mutually exclusive with `candidates` |
 | `expected_overlay_scope` | Unset | Optional expected `network`, `gateway`, `namespace`, and `local_site`; requires envelope mode |

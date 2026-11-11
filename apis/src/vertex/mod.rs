@@ -61,7 +61,7 @@ use tracing::{debug, trace, warn};
 use self::config::{VertexConfig, build_config};
 use crate::{
     anthropic::invalid_request_rejection,
-    openai::sse::SseFrameParser,
+    openai::sse::{SseFrame, SseFrameParser},
     vertex::request::{classify, transform_request},
 };
 
@@ -377,11 +377,6 @@ fn warn_if_encoded(ctx: &HttpFilterContext<'_>) {
 /// Patch an SSE chunk: parse complete frames, restore the model in
 /// `message_start` only, and re-emit. Partial frames stay in the
 /// per-request parser across chunk boundaries.
-#[expect(
-    clippy::cognitive_complexity,
-    clippy::too_many_lines,
-    reason = "keeps the in-flight SSE parser state transition together; tracing macros inflate clippy complexity (rust-lang/rust-clippy#14417)"
-)]
 fn patch_sse_chunk(ctx: &mut HttpFilterContext<'_>, body: &mut Option<Bytes>, end_of_stream: bool) {
     let Some(bytes) = body.as_ref() else {
         if end_of_stream {
@@ -396,31 +391,37 @@ fn patch_sse_chunk(ctx: &mut HttpFilterContext<'_>, body: &mut Option<Bytes>, en
         return;
     };
 
-    let frames = match parser.parse_chunk(bytes) {
-        Ok(frames) => frames,
-        Err(error) => {
-            // A malformed or oversized frame must not kill the stream or
-            // emit split duplicates; drop the chunk and let the stream
-            // finish (matches the azure translation filter's behavior).
-            warn!(%error, "vertex: SSE frame parse failed; dropping chunk to keep the stream alive");
-            ctx.insert_filter_state(parser);
-            *body = Some(Bytes::new());
-            return;
-        },
+    let Some(frames) = parse_sse_frames(&mut parser, bytes, end_of_stream) else {
+        ctx.insert_filter_state(parser);
+        *body = Some(Bytes::new());
+        return;
     };
-    if frames.is_empty() && !end_of_stream {
-        trace!("vertex: SSE chunk contains no complete frame; buffering");
-    }
 
     if !end_of_stream {
         ctx.insert_filter_state(parser);
     }
 
-    let user_model = ctx.get_metadata(MODEL_KEY).map(str::to_owned);
     *body = Some(Bytes::from(response::rebuild_sse_frames(
         &frames,
-        user_model.as_deref(),
+        ctx.get_metadata(MODEL_KEY),
     )));
+}
+
+/// Parse complete frames while leaving partial input in the per-request parser.
+fn parse_sse_frames(parser: &mut SseFrameParser, bytes: &[u8], end_of_stream: bool) -> Option<Vec<SseFrame>> {
+    let frames = match parser.parse_chunk(bytes) {
+        Ok(frames) => frames,
+        Err(error) => {
+            // Preserve the legacy behavior: discard a malformed or oversized
+            // chunk, retain the parser, and let later chunks finish the stream.
+            warn!(%error, "vertex: SSE frame parse failed; dropping chunk to keep the stream alive");
+            return None;
+        },
+    };
+    if frames.is_empty() && !end_of_stream {
+        trace!("vertex: SSE chunk contains no complete frame; buffering");
+    }
+    Some(frames)
 }
 
 /// Translate a buffered Google error envelope to the Anthropic shape,

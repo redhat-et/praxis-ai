@@ -1,4 +1,10 @@
-#![allow(clippy::missing_docs_in_private_items, reason = "private policy protocol types")]
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Praxis Contributors
+
+#![cfg_attr(
+    not(test),
+    expect(clippy::missing_docs_in_private_items, reason = "private policy protocol types")
+)]
 
 use std::time::Instant;
 

@@ -38,7 +38,7 @@ async fn legacy_provider_mapping_preserves_header_routing_and_public_model() {
         "legacy provider selection must remain available to the router"
     );
     assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(body.as_ref().unwrap()).unwrap()["model"],
+        serde_json::from_slice::<Value>(body.as_ref().unwrap()).unwrap()["model"],
         "private"
     );
     assert!(ctx.cluster.is_none());

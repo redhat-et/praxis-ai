@@ -264,10 +264,11 @@ impl ExternalMeteringFilter {
         if cfg.internal_auth_file.is_some() && cfg.internal_auth_token.is_some() {
             return Err("external_metering: configure only one of internal_auth_file and internal_auth_token".into());
         }
+        let legacy_file = cfg.internal_auth_file.is_some();
         let credential = cfg
             .internal_auth_token
             .or_else(|| cfg.internal_auth_file.map(CredentialSource::File));
-        let (auth_token, auth_watch) = build_auth_token(credential.as_ref())?;
+        let (auth_token, auth_watch) = build_auth_token(credential.as_ref(), legacy_file)?;
 
         Ok(Self {
             address_policy: AddressPolicy::from_allow_private(cfg.allow_private_endpoint),
@@ -910,6 +911,7 @@ fn is_success(status: u16) -> bool {
 /// construction (fail loud at startup).
 fn build_auth_token(
     source: Option<&CredentialSource>,
+    legacy_file: bool,
 ) -> Result<(Option<SecretHandle>, Option<WatchHandle>), FilterError> {
     let Some(source) = source else {
         return Ok((None, None));
@@ -919,7 +921,12 @@ fn build_auth_token(
         reference: None,
     };
     let transform = credential_source::bearer_header("external_metering", "internal_auth_token");
-    let (handle, watch) = credential_source::build_one(ctx, source, transform)?;
+    let (handle, watch) = credential_source::build_one(ctx, source, move |token| {
+        if legacy_file && token.chars().any(char::is_whitespace) {
+            return Err("external_metering: internal_auth_file contains whitespace".into());
+        }
+        transform(token)
+    })?;
     Ok((Some(handle), watch))
 }
 

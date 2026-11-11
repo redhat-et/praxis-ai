@@ -124,6 +124,15 @@ struct ModelProviderMapping {
 /// enforced even when another filter requests a larger shared buffer. Zero
 /// remains invalid; YAML `null` behaves like omission.
 ///
+/// Existing fork configurations using `models[].provider` still select the
+/// provider through `x-praxis-ai-provider` for a following header-based router.
+/// They retain the same `model`, `target_model`, and `paths` fields and record
+/// the public model ID in `model_to_provider.client_model`. These mappings do
+/// not directly select a cluster. Use either `provider` mappings or `upstream`
+/// mappings within one filter; mixing the two schemas is rejected.
+/// `fallback_upstream` belongs only to the upstream schema. Both schemas
+/// inherit pipeline body limits unless `max_body_bytes` is explicitly set.
+///
 /// # YAML configuration
 ///
 /// ```yaml

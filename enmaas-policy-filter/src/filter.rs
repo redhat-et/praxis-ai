@@ -1,10 +1,15 @@
-#![allow(
-    clippy::missing_docs_in_private_items,
-    clippy::struct_excessive_bools,
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Praxis Contributors
+
+#![expect(
     clippy::too_many_arguments,
     clippy::significant_drop_tightening,
     clippy::too_many_lines,
     reason = "private filter internals"
+)]
+#![cfg_attr(
+    not(test),
+    expect(clippy::missing_docs_in_private_items, reason = "retained private policy internals")
 )]
 
 use std::{
@@ -22,7 +27,7 @@ use metrics::{counter, histogram};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use praxis_ai_apis::{
     callout_target::AddressPolicy,
-    subrequest::{self, SubRequest, SubRequestClient, SubRequestError, SubResponse},
+    subrequest::{SubRequest, SubRequestClient, SubResponse},
 };
 use praxis_core::subrequest::SubRequestConnector;
 use praxis_filter::{
@@ -34,13 +39,13 @@ use tracing::{debug, warn};
 
 use crate::{
     buckets::{BucketLimits, BucketOutcome, LocalBuckets},
+    callout::MeteringCallout,
     config::{CredentialMode, EnmaasPolicyConfig, QosEnforcement, validate_config},
     events::{EventReporter, RequestState, store_state, take_state, update_response},
     keys::{KeyRing, SelectedKey},
     policy::{CachedDecision, DenyReason, MeteringEntitlement, PolicyDecision},
 };
 
-const MAX_POLICY_RESPONSE_BYTES: usize = 64 * 1024;
 const PATH_SEGMENT: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'"')
@@ -80,8 +85,7 @@ fn strip_client_headers(ctx: &mut HttpFilterContext<'_>) {
 
 pub(crate) struct EnmaasPolicyFilter {
     config: EnmaasPolicyConfig,
-    address_policy: AddressPolicy,
-    client: SubRequestClient,
+    callout: MeteringCallout,
     metering_auth_token: Option<HeaderValue>,
     promoted_model_header: HeaderName,
     response_class_header: Option<HeaderName>,
@@ -109,7 +113,7 @@ impl EnmaasPolicyFilter {
         let promoted_model_header = config.promoted_model_header_name()?;
         let response_class_header = config.response_class_header_name()?;
         let credential_header = config.credential_header_name()?;
-        let client = isolated_subrequest_client(4);
+        let callout = MeteringCallout::new(isolated_subrequest_client(4), address_policy, config.timeout())?;
         let keys = if config.credential_mode == CredentialMode::Off {
             KeyRing::default()
         } else {
@@ -120,10 +124,8 @@ impl EnmaasPolicyFilter {
             KeyRing::load(config.key_file.as_deref(), &config.header_prefix, default_key)?
         };
         let events = EventReporter::new(
-            client.clone(),
+            callout.clone(),
             &config.metering_url,
-            config.timeout(),
-            address_policy,
             metering_auth_token.clone(),
             config.source.clone(),
             config.provider.clone(),
@@ -140,8 +142,7 @@ impl EnmaasPolicyFilter {
             key_id_clusters: config.key_id_clusters.clone(),
             qos_clusters: config.qos_clusters.clone(),
             config,
-            address_policy,
-            client,
+            callout,
             metering_auth_token,
             promoted_model_header,
             response_class_header,
@@ -281,19 +282,10 @@ impl EnmaasPolicyFilter {
 
         let started = Instant::now();
         let response: SubResponse = self
-            .client
-            .execute_url(
-                &url,
-                request,
-                subrequest::address_policy_hook(self.address_policy),
-                subrequest::UrlResolutionPolicy::OperatorCached,
-                self.config.timeout(),
-                MAX_POLICY_RESPONSE_BYTES,
-                None,
-            )
+            .callout
+            .execute(&url, request)
             .await
-            .map_err(subrequest::map_url_error)
-            .map_err(|error| describe_subrequest_error(&error))?;
+            .map_err(|error| format!("metering callout failed: {error}"))?;
         histogram!("enmaas_policy_callout_duration_seconds").record(started.elapsed().as_secs_f64());
         histogram!("enmaas_policy_metering_duration_seconds").record(started.elapsed().as_secs_f64());
 
@@ -516,7 +508,7 @@ impl HttpFilter for EnmaasPolicyFilter {
             self.apply_decision(ctx, &decision, &username, true)
         } else {
             counter!("enmaas_policy_cache_requests_total", "result" => "miss").increment(1);
-            match self.fetch_decision(&username, &model).await {
+            match Box::pin(self.fetch_decision(&username, &model)).await {
                 Ok(decision) => {
                     self.store(cache_key, decision.clone()).await;
                     self.apply_decision(ctx, &decision, &username, false)
@@ -610,10 +602,6 @@ impl HttpFilter for EnmaasPolicyFilter {
 fn isolated_subrequest_client(pool_size: usize) -> SubRequestClient {
     praxis_tls::provider::install();
     SubRequestClient::new(SubRequestConnector::new(pool_size, None))
-}
-
-fn describe_subrequest_error(error: &SubRequestError) -> String {
-    format!("metering callout failed: {error}")
 }
 
 fn reject_budget(class: &str, retry_after: Option<u64>, include_class: bool) -> FilterAction {

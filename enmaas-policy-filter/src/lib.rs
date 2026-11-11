@@ -1,12 +1,12 @@
-#![allow(
-    clippy::missing_docs_in_private_items,
-    clippy::doc_markdown,
-    reason = "private filter internals"
-)]
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Praxis Contributors
+
+#![expect(clippy::doc_markdown, reason = "private filter internals")]
 
 //! EnMaaS request authorization and QoS policy filter.
 
 mod buckets;
+mod callout;
 mod config;
 mod events;
 mod filter;

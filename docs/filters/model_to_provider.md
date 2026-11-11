@@ -5,6 +5,8 @@
 
 Maps stable client-facing model IDs to existing upstream clusters and provider-specific target models.
 
+Maps stable client-facing model IDs to an internal provider selector and provider-specific target model.
+
 ## Configuration Notes
 
 An exact model/path match rewrites the JSON body model and records the client ID for metering and provider response adapters. During the request phase, the filter selects the mapping's `upstream` cluster. A following `load_balancer` owns endpoint selection, health checks, and retries; no header-matching `router` or provider registry is needed.
@@ -19,6 +21,10 @@ Request buffering inherits the pipeline's `max_request_bytes` and `max_buffer_by
 
 Omitting the limit removes the former implicit 10 MiB filter cap; pipeline limits still apply. Existing positive values remain valid and are now enforced even when another filter requests a larger shared buffer. Zero remains invalid; YAML `null` behaves like omission.
 
+Existing fork configurations using `models[].provider` still select the provider through `x-praxis-ai-provider` for a following header-based router. They retain the same `model`, `target_model`, and `paths` fields and record the public model ID in `model_to_provider.client_model`. These mappings do not directly select a cluster. Use either `provider` mappings or `upstream` mappings within one filter; mixing the two schemas is rejected. `fallback_upstream` belongs only to the upstream schema. Both schemas inherit pipeline body limits unless `max_body_bytes` is explicitly set.
+
+An exact model/path match sets `x-praxis-ai-provider` for the `router`, rewrites the JSON body model, and records the client ID in filter metadata for provider response adapters. Unknown models and paths pass through. Configuration is pipeline-local: the filter performs no Kubernetes or other control-plane lookups.
+
 ## Configuration
 
 | Field | Type | Required | Description |
@@ -30,8 +36,11 @@ Omitting the limit removes the former implicit 10 MiB filter cap; pipeline limit
 | `models[].paths` | string[] | yes | Exact inference paths on which this mapping applies. |
 | `fallback_upstream` | string | no | Existing load-balancer cluster selected when no model/path mapping matches. |
 | `max_body_bytes` | integer | no | Optional hard request-body processing limit in bytes. Omit to inherit pipeline `max_request_bytes` and `max_buffer_bytes`; oversize bodies return HTTP 413 before parsing. |
+| `models[].provider` | string | yes | Provider selector consumed by the unified `router` configuration. |
 
-## Example
+## Examples
+
+### Example 1
 
 ```yaml
 filter: model_to_provider
@@ -39,5 +48,16 @@ models:
   - model: claude-sonnet-4-5
     upstream: vertex-prod
     target_model: claude-sonnet-4-5@20250929
+    paths: [/v1/messages, /v1/messages/count_tokens]
+```
+
+### Example 2
+
+```yaml
+filter: model_to_provider
+models:
+  - model: claude-sonnet-4-5
+    provider: vertex
+    target_model: vertex/claude-sonnet-4-5
     paths: [/v1/messages, /v1/messages/count_tokens]
 ```

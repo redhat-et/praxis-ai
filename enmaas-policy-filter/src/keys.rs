@@ -1,7 +1,10 @@
-#![allow(
-    clippy::missing_docs_in_private_items,
-    clippy::too_many_lines,
-    reason = "private credential internals"
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Praxis Contributors
+
+#![expect(clippy::too_many_lines, reason = "private credential internals")]
+#![cfg_attr(
+    not(test),
+    expect(clippy::missing_docs_in_private_items, reason = "retained private policy internals")
 )]
 
 use std::{collections::HashMap, fs};

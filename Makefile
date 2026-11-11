@@ -321,7 +321,7 @@ test-postgres-unit:
 # must follow `--` so libtest treats each as an OR filter. Add every new
 # PostgreSQL integration module to this list.
 test-postgres-integration:
-	cargo test -p praxis-tests-integration --test suite -- --ignored \
+	cargo test -p praxis-tests-integration --features openai-all,store-postgres --test suite -- --ignored \
 		openai_responses_store_postgres \
 		openai_responses_store_postgres_mtls \
 		openai_conversations_postgres_mtls $(if $(V),--nocapture)

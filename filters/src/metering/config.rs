@@ -89,8 +89,9 @@ pub(super) struct ExternalMeteringConfig {
     pub identity_metadata_namespace: String,
 
     /// Optional file containing the bearer token used to authenticate
-    /// gateway-to-metering subrequests. The file is read at pipeline build
-    /// time and the token is never logged or put in the request body.
+    /// gateway-to-metering subrequests. This compatibility setting uses the
+    /// shared file watcher and rejects empty tokens or embedded whitespace
+    /// at startup and rotation. The token never enters logs or request bodies.
     #[serde(default)]
     pub internal_auth_file: Option<String>,
 

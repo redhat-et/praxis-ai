@@ -1,9 +1,11 @@
-#![allow(
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Praxis Contributors
+
+#![expect(
     clippy::expect_used,
     clippy::indexing_slicing,
     clippy::panic,
     clippy::too_many_lines,
-    clippy::unwrap_used,
     reason = "tests"
 )]
 
@@ -106,6 +108,7 @@ fn make_filter_context(req: &Request) -> HttpFilterContext<'_> {
         cluster: Some(Arc::from("cb-glm")),
         current_filter_id: None,
         downstream_tls: false,
+        hedge_policy: None,
         extensions: RequestExtensions::default(),
         executed_filter_indices: Vec::new(),
         executed_branch_filters: Vec::new(),
@@ -149,7 +152,8 @@ fn make_filter_context(req: &Request) -> HttpFilterContext<'_> {
     }
 }
 
-fn mock_policy(body: &'static str) -> (String, Arc<Mutex<String>>, thread::JoinHandle<()>) {
+fn mock_policy(body: impl Into<String>) -> (String, Arc<Mutex<String>>, thread::JoinHandle<()>) {
+    let body = body.into();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock policy");
     let address = listener.local_addr().expect("mock policy address");
     let captured = Arc::new(Mutex::new(String::new()));
@@ -1013,4 +1017,116 @@ async fn missing_model_rejected_when_disallowed() {
         },
         other => panic!("expected missing-model rejection, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn oversized_metering_response_fails_closed() {
+    let body = serde_json::json!({
+        "hasAccess": true,
+        "modelAllowed": true,
+        "padding": "x".repeat(65_536),
+    })
+    .to_string();
+    let (url, _captured, server) = mock_policy(body);
+    let filter = build_filter_with(&url, "fail_open: false");
+    let request = make_request(Method::POST, "/v1/chat/completions");
+    let mut ctx = make_filter_context(&request);
+    ctx.set_metadata("x-tenant-username", "alice");
+    ctx.set_metadata("model_to_provider.client_model", "public-model");
+    let action = filter.on_request(&mut ctx).await.expect("policy request");
+    assert!(
+        matches!(action, FilterAction::Reject(rejection) if rejection.status == 503),
+        "oversized entitlement must follow fail-closed policy"
+    );
+    server.join().expect("mock policy server");
+}
+
+#[tokio::test]
+async fn metering_callout_rejects_private_addresses_by_default() {
+    use praxis_ai_apis::{callout_target::AddressPolicy, subrequest::SubRequest};
+
+    let callout = test_callout(AddressPolicy::PublicOnly);
+    let request = SubRequest {
+        method: Method::GET,
+        uri: Uri::default(),
+        headers: HeaderMap::new(),
+        body: Bytes::new(),
+    };
+    let error = callout
+        .execute("http://127.0.0.1:1/", request)
+        .await
+        .expect_err("private endpoint rejected");
+    assert!(
+        error.to_string().contains("private"),
+        "address policy must reject before connecting: {error}"
+    );
+}
+
+#[tokio::test]
+async fn usage_report_preserves_event_authentication_and_token_counts() {
+    use praxis_ai_apis::callout_target::AddressPolicy;
+
+    use crate::events::{EventReporter, RequestState};
+
+    let (url, captured, server) = mock_policy("{}");
+    let reporter = EventReporter::new(
+        test_callout(AddressPolicy::AllowPrivate),
+        &url,
+        Some(HeaderValue::from_static("Bearer test-metering-token")),
+        "test-proxy".to_owned(),
+        None,
+        "unknown".to_owned(),
+    );
+    let request = make_request(Method::POST, "/v1/chat/completions");
+    let mut ctx = make_filter_context(&request);
+    ctx.set_metadata("token.input", "11");
+    ctx.set_metadata("token.output", "7");
+    ctx.set_metadata("token.total", "18");
+    let state = RequestState {
+        username: "alice".to_owned(),
+        group: "team".to_owned(),
+        subscription: "premium".to_owned(),
+        model: "public-model".to_owned(),
+        user_agent: "test".to_owned(),
+        start: std::time::Instant::now(),
+        is_error: false,
+        response_status: 200,
+    };
+    reporter.report(&ctx, &state);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while captured.lock().expect("capture lock").is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("usage report delivered");
+    server.join().expect("mock event server");
+    let wire = captured.lock().expect("capture lock");
+    let (headers, body) = wire.split_once("\r\n\r\n").expect("HTTP request");
+    assert!(
+        headers.starts_with("POST /api/v1/events HTTP/1.1"),
+        "event uses the configured endpoint"
+    );
+    assert!(
+        headers
+            .to_ascii_lowercase()
+            .contains("authorization: bearer test-metering-token"),
+        "event retains internal authentication"
+    );
+    let event: serde_json::Value = serde_json::from_str(body).expect("CloudEvent JSON");
+    drop(wire);
+    assert_eq!(event["type"], "inference.tokens.used");
+    assert_eq!(event["subject"], "alice");
+    assert_eq!(event["data"]["model"], "public-model");
+    assert_eq!(event["data"]["prompt_tokens"], 11);
+    assert_eq!(event["data"]["completion_tokens"], 7);
+    assert_eq!(event["data"]["total_tokens"], 18);
+}
+
+fn test_callout(address_policy: praxis_ai_apis::callout_target::AddressPolicy) -> crate::callout::MeteringCallout {
+    praxis_tls::provider::install();
+    let client =
+        praxis_ai_apis::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(4, None));
+    crate::callout::MeteringCallout::new(client, address_policy, std::time::Duration::from_secs(2))
+        .expect("callout builds")
 }

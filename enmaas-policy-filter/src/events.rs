@@ -1,8 +1,14 @@
-#![allow(
-    clippy::missing_docs_in_private_items,
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Praxis Contributors
+
+#![expect(
     clippy::too_many_arguments,
     clippy::too_many_lines,
     reason = "private event internals"
+)]
+#![cfg_attr(
+    not(test),
+    expect(clippy::missing_docs_in_private_items, reason = "retained private policy internals")
 )]
 
 use std::time::Instant;
@@ -13,18 +19,16 @@ use http::{
     header::{AUTHORIZATION, CONTENT_TYPE},
 };
 use metrics::counter;
-use praxis_ai_apis::{
-    callout_target::AddressPolicy,
-    subrequest::{self, SubRequest, SubRequestClient},
-};
+use praxis_ai_apis::subrequest::SubRequest;
 use praxis_filter::HttpFilterContext;
 use serde_json::json;
 use tracing::{trace, warn};
 
+use crate::callout::MeteringCallout;
+
 const CE_SPEC_VERSION: &str = "1.0";
 const CE_TYPE_ERROR: &str = "inference.request.error";
 const CE_TYPE_USAGE: &str = "inference.tokens.used";
-const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const META_TOKEN_INPUT: &str = "token.input";
 const META_TOKEN_OUTPUT: &str = "token.output";
 const META_TOKEN_TOTAL: &str = "token.total";
@@ -45,10 +49,8 @@ pub(crate) struct RequestState {
 
 #[derive(Clone)]
 pub(crate) struct EventReporter {
-    client: SubRequestClient,
+    callout: MeteringCallout,
     url: String,
-    timeout: std::time::Duration,
-    address_policy: AddressPolicy,
     auth_token: Option<HeaderValue>,
     source: String,
     provider: Option<String>,
@@ -57,20 +59,16 @@ pub(crate) struct EventReporter {
 
 impl EventReporter {
     pub(crate) fn new(
-        client: SubRequestClient,
+        callout: MeteringCallout,
         metering_url: &str,
-        timeout: std::time::Duration,
-        address_policy: AddressPolicy,
         auth_token: Option<HeaderValue>,
         source: String,
         provider: Option<String>,
         default_model: String,
     ) -> Self {
         Self {
-            client,
+            callout,
             url: format!("{}/api/v1/events", metering_url.trim_end_matches('/')),
-            timeout,
-            address_policy,
             auth_token,
             source,
             provider,
@@ -147,10 +145,8 @@ impl EventReporter {
     }
 
     fn spawn(&self, body: Vec<u8>) {
-        let client = self.client.clone();
+        let callout = self.callout.clone();
         let url = self.url.clone();
-        let timeout = self.timeout;
-        let address_policy = self.address_policy;
         let auth_token = self.auth_token.clone();
         tokio::spawn(async move {
             let mut headers = http::HeaderMap::new();
@@ -164,17 +160,7 @@ impl EventReporter {
                 headers,
                 body: Bytes::from(body),
             };
-            let result = client
-                .execute_url(
-                    &url,
-                    request,
-                    subrequest::address_policy_hook(address_policy),
-                    subrequest::UrlResolutionPolicy::OperatorCached,
-                    timeout,
-                    MAX_RESPONSE_BYTES,
-                    None,
-                )
-                .await;
+            let result = callout.execute(&url, request).await;
             match result {
                 Ok(response) if (200..300).contains(&response.status) => {
                     trace!(status = response.status, "enmaas_policy: usage event sent");

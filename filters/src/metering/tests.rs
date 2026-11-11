@@ -1302,9 +1302,9 @@ fn authed_headers_unauthenticated_sends_no_authorization() {
 
 #[test]
 fn authed_headers_attaches_authorization() {
-    let value = http::HeaderValue::from_static("Bearer tok");
+    let value = HeaderValue::from_static("Bearer tok");
     let headers = authed_headers(AuthOutcome::Header(value)).expect("an available token must not fail closed");
-    assert_eq!(headers.get(http::header::AUTHORIZATION).unwrap(), "Bearer tok");
+    assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer tok");
 }
 
 #[test]
@@ -1342,8 +1342,8 @@ fn balance_callout_fail_closed_rejects_on_unavailable_token() {
 #[test]
 fn balance_callout_attaches_authorization_when_available() {
     let filter = filter_from_yaml("metering_url: \"http://metering:8080\"\n");
-    match filter.balance_callout_headers(AuthOutcome::Header(http::HeaderValue::from_static("Bearer tok"))) {
-        Ok(headers) => assert_eq!(headers.get(http::header::AUTHORIZATION).unwrap(), "Bearer tok"),
+    match filter.balance_callout_headers(AuthOutcome::Header(HeaderValue::from_static("Bearer tok"))) {
+        Ok(headers) => assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer tok"),
         Err(_) => panic!("an available token must produce authenticated balance headers"),
     }
 }
@@ -1370,8 +1370,8 @@ fn report_callout_drops_on_unavailable_token() {
 
 #[test]
 fn report_callout_attaches_authorization_when_available() {
-    match report_callout_headers(AuthOutcome::Header(http::HeaderValue::from_static("Bearer tok"))) {
-        Some(headers) => assert_eq!(headers.get(http::header::AUTHORIZATION).unwrap(), "Bearer tok"),
+    match report_callout_headers(AuthOutcome::Header(HeaderValue::from_static("Bearer tok"))) {
+        Some(headers) => assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer tok"),
         None => panic!("an available token must produce authenticated usage-report headers"),
     }
 }

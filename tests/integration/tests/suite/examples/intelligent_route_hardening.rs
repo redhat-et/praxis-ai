@@ -15,8 +15,8 @@
 use std::collections::HashMap;
 
 use praxis_test_utils::{
-    free_port, http_send, load_example_config, parse_status, start_backend_with_shutdown, start_proxy,
-    start_stateful_backend,
+    StatefulCapturingBackend, free_port, http_send, load_example_config, parse_status, start_backend_with_shutdown,
+    start_proxy, start_stateful_backend,
 };
 
 const INFERENCE_EXAMPLE: &str = "intelligent-route-inference.yaml";
@@ -137,4 +137,47 @@ fn body_model_routes_to_matching_cluster() {
         raw.contains("granite-backend"),
         "body model must route to granite: {raw}"
     );
+}
+
+/// Body-based selection must restore trusted hop headers after stripping the
+/// client's copies in the request phase, while retaining the target rewrite.
+#[test]
+fn body_selection_preserves_provider_hop_headers() {
+    let backend = StatefulCapturingBackend::new(vec![(200, "routed".to_owned())]).start_with_shutdown();
+    let mut config = load_example_config(
+        "intelligent-route-target-model.yaml",
+        free_port(),
+        HashMap::from([("127.0.0.1:8001", backend.port())]),
+    );
+    let route = config.filter_chains[0]
+        .filters
+        .iter_mut()
+        .find(|filter| filter.filter_type == "intelligent_route")
+        .unwrap();
+    route.config["body_authoritative"] = serde_yaml::Value::Bool(true);
+    route.config["provider_hop_clusters"] = serde_yaml::to_value(["provider-a"]).unwrap();
+    let proxy = start_proxy(&config);
+    let body = r#"{"model":"public-model","messages":[]}"#;
+    let response = http_send(
+        proxy.addr(),
+        &chat_post_with_headers(
+            body,
+            &[
+                "X-Ai-Routing-Candidate: client-spoof",
+                "X-Ai-Routing-Request-Id: client-spoof",
+            ],
+        ),
+    );
+    assert_eq!(parse_status(&response), 200, "provider hop should succeed: {response}");
+    let requests = backend.requests();
+    let request = requests.iter().find(|request| request.method == "POST").unwrap();
+    let headers = request.headers.to_ascii_lowercase();
+    assert!(headers.contains("x-ai-routing-candidate: inference_model/public-model/site-a/provider-a"));
+    assert!(headers.contains("x-ai-routing-request-id: "));
+    assert!(
+        !headers.contains("client-spoof"),
+        "client routing context must be replaced"
+    );
+    let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+    assert_eq!(body["model"], "provider-a/internal-model");
 }

@@ -15,7 +15,7 @@ Reads the user's group from `filter_metadata` (set by upstream auth filters like
 |-------|------|---------|-------------|
 | `mode` | `allowlist` \| `denylist` | yes | Default access mode applied when no group override matches. |
 | `models` | string[] | yes | Default model patterns. Supports trailing `*` for prefix matching. |
-| `overrides` | GroupOverride[] | no | Per-group overrides. Checked in order; first matching group wins. |
+| `overrides` | object[] | no | Per-group overrides. Checked in order; first matching group wins. |
 | `overrides[].groups` | string[] | yes | Groups this override applies to. |
 | `overrides[].mode` | `allowlist` \| `denylist` | yes | Access mode for these groups. |
 | `overrides[].models` | string[] | yes | Model patterns for these groups. |
