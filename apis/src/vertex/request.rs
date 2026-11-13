@@ -168,6 +168,14 @@ fn transform_messages(obj: &mut serde_json::Map<String, Value>, publisher: &str,
     // client-side context-management control field. Drop it at the dialect
     // boundary rather than forwarding a request Vertex will reject.
     obj.remove("context_management");
+    // The beta-only thinking block-binding controls are not supported by the
+    // Vertex partner endpoint. The beta header is already filtered by
+    // beta_allowlist, so forwarding the body field would make Vertex reject
+    // the request with "thinking.adaptive.block_binding: Extra inputs are not
+    // permitted". Keep adaptive thinking itself intact.
+    if let Some(thinking) = obj.get_mut("thinking").and_then(Value::as_object_mut) {
+        thinking.remove("block_binding");
+    }
     obj.insert(
         "anthropic_version".to_owned(),
         Value::String(VERTEX_ANTHROPIC_VERSION.to_owned()),
@@ -246,6 +254,30 @@ mod tests {
         let parsed: Value = serde_json::from_slice(&out.body).unwrap();
         assert!(parsed.get("context_management").is_none());
         assert_eq!(parsed["anthropic_version"], VERTEX_ANTHROPIC_VERSION);
+    }
+
+    #[test]
+    fn messages_drop_vertex_unsupported_thinking_block_binding() {
+        let body = json!({
+            "model": "vertex/claude-opus-5-5",
+            "max_tokens": 8,
+            "thinking": {"type": "adaptive", "block_binding": {}, "display": "summarized"},
+            "messages": []
+        })
+        .to_string();
+        let out = transform_request(body.as_bytes(), Operation::Messages, &cfg())
+            .unwrap()
+            .unwrap();
+        let parsed: Value = serde_json::from_slice(&out.body).unwrap();
+        assert!(
+            parsed["thinking"].get("block_binding").is_none(),
+            "Vertex rejects thinking.block_binding; it must be stripped"
+        );
+        assert_eq!(parsed["thinking"]["type"], "adaptive", "thinking itself must survive");
+        assert_eq!(
+            parsed["thinking"]["display"], "summarized",
+            "other thinking fields survive"
+        );
     }
 
     #[test]
