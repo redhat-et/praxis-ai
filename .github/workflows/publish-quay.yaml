@@ -31,6 +31,7 @@ jobs:
       contents: read
     env:
       IMAGE: quay.io/modden/praxis-ai
+      REDHAT_IMAGE: quay.io/redhat/praxis-ai
       # Upstream full excludes the opt-in OpenAI groups and stores.
       # Retain the deployed fork capabilities explicitly.
       PRAXIS_AI_FEATURES: full,openai-all,store-postgres,gcp-adc-filter,vertex-anthropic-filter,api-key-auth-filter
@@ -63,12 +64,13 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: Log in to quay
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: quay.io
-          username: ${{ secrets.QUAY_USERNAME }}
-          password: ${{ secrets.QUAY_TOKEN }}
+      - name: Log in to Quay
+        env:
+          QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+          QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
+        run: |
+          printf '%s' "$QUAY_TOKEN" | docker login quay.io \
+            -u "$QUAY_USERNAME" --password-stdin
 
       - name: Compute image tags
         id: tags
@@ -101,6 +103,15 @@ jobs:
             PRAXIS_AI_FEATURES=${{ env.PRAXIS_AI_FEATURES }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Tag image for Red Hat Quay
+        run: |
+          docker pull "${IMAGE}:sha-${SOURCE_SHA}"
+          docker tag "${IMAGE}:sha-${SOURCE_SHA}" \
+            "${REDHAT_IMAGE}:sha-${SOURCE_SHA}"
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            docker tag "${IMAGE}:sha-${SOURCE_SHA}" "${REDHAT_IMAGE}:main"
+          fi
 
       - name: Generate source SBOM
         uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
@@ -135,6 +146,21 @@ jobs:
             source.spdx.json
             image.spdx.json
           retention-days: 90
+
+      - name: Log in to Red Hat Quay
+        env:
+          QUAY_ORG_USERNAME: ${{ secrets.QUAY_ORG_USERNAME }}
+          QUAY_ORG_TOKEN: ${{ secrets.QUAY_ORG_TOKEN }}
+        run: |
+          printf '%s' "$QUAY_ORG_TOKEN" | docker login quay.io \
+            -u "$QUAY_ORG_USERNAME" --password-stdin
+
+      - name: Push Red Hat tags
+        run: |
+          docker push "${REDHAT_IMAGE}:sha-${SOURCE_SHA}"
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            docker push "${REDHAT_IMAGE}:main"
+          fi
 
       - name: Record digest
         id: digest
