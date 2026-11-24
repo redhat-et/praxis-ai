@@ -18,7 +18,7 @@ place until the planned build and deployment migration. Every build is also
 mirrored to the org-owned repository:
 
 ```text
-quay.io/redhat/praxis-ai
+quay.io/redhat-et/praxis-ai
 ```
 
 The mirror is a registry-side `skopeo` copy of the built image at its digest.
@@ -90,9 +90,10 @@ artifact with the deployment record.
 
 - Primary repository: `quay.io/modden/praxis-ai`
   - Owner: Mathew Odden (`@mrodden`)
-- Mirror repository: `quay.io/redhat/praxis-ai`
-  - Owner: the Red Hat organization on Quay; written only by the mirror
-    robot described under [Credentials](#credentials)
+- Mirror repository: `quay.io/redhat-et/praxis-ai`
+  - Owner: the `redhat-et` organization on Quay (matching the GitHub
+    organization); written only by the mirror robot described under
+    [Credentials](#credentials)
 - Intended long-term target: an org-owned build pipeline
 
 The personal namespace is an interim build path, not a production
@@ -109,7 +110,7 @@ Three separate robot accounts are used:
   credentials are stored only as the `QUAY_USERNAME` and `QUAY_TOKEN` GitHub
   Actions repository secrets and are used only by this workflow.
 - **Mirror/push (org):** a robot with `Write` permission on
-  `quay.io/redhat/praxis-ai`. Its credentials are stored only as the
+  `quay.io/redhat-et/praxis-ai`. Its credentials are stored only as the
   `QUAY_ORG_USERNAME` and `QUAY_ORG_TOKEN` repository secrets and are used
   only by this workflow.
 - **Pull:** one separate read-only robot with `Read` permission on the
@@ -148,7 +149,7 @@ leaves, and otherwise on a regular schedule (at least every 90 days).
 - Manual dispatches produce only the `:sha-` tag for the selected commit.
 - Tags are convenience pointers. The image digest is the immutable reference.
 - The workflow records `quay.io/modden/praxis-ai@sha256:...` and
-  `quay.io/redhat/praxis-ai@sha256:...` — the same digest, mirrored and
+  `quay.io/redhat-et/praxis-ai@sha256:...` — the same digest, mirrored and
   verified by the publish job — plus the source commit and the SBOM artifact
   name in the Actions run summary. That digest is the authoritative
   deployment reference.

@@ -4,7 +4,7 @@ name: Publish (quay)
 # nightly schedule with FIPS variants; this workflow pushes the EnMaaS
 # deployment image to quay.io/modden/praxis-ai (interim personal
 # namespace) on every push to main and mirrors the identical image index
-# to the org-owned quay.io/redhat/praxis-ai, so deployment digest pins
+# to the org-owned quay.io/redhat-et/praxis-ai, so deployment digest pins
 # track the fork. The mirror is a registry-side skopeo copy: it preserves
 # the pushed index and its attestation manifests at the same digest and
 # never passes the image through the daemon image store, which would
@@ -42,7 +42,7 @@ jobs:
       contents: read
     env:
       IMAGE: quay.io/modden/praxis-ai
-      REDHAT_IMAGE: quay.io/redhat/praxis-ai
+      REDHAT_IMAGE: quay.io/redhat-et/praxis-ai
       # Upstream full excludes the opt-in OpenAI groups and stores.
       # Retain the deployed fork capabilities explicitly.
       PRAXIS_AI_FEATURES: full,openai-all,store-postgres,gcp-adc-filter,vertex-anthropic-filter,api-key-auth-filter
