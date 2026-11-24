@@ -223,7 +223,7 @@ jobs:
           {
             echo "### Published praxis-ai image"
             echo ""
-            echo "\`$IMAGE@$DIGEST\`"
+            echo "\`$IMAGE@$DIGEST\` (canonical)"
             echo "\`$REDHAT_IMAGE@$DIGEST\` (registry-side mirror, digest verified)"
             echo ""
             echo "- source commit: \`$SOURCE_SHA\`"
