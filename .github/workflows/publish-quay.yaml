@@ -23,10 +23,15 @@ on:
         required: false
         type: string
 
-# Serialize publications per branch. With cancel-in-progress disabled,
-# runs queue instead of overlapping, so a run building an older commit
-# can never move the mutable main tags backward after a newer run has
-# published them; the tip check in the tags step relies on this
+# Serialize publications per branch. GitHub Actions keeps at most one
+# running and one pending run per group, and a newer run replaces the
+# pending one, so when several commits land on main in quick succession
+# the superseded commits' publishes are skipped: they receive no image,
+# SBOM, or sha- tag until they are built by the manual dispatch path. A
+# running publish is never cancelled (cancel-in-progress is false), so
+# exactly one publish executes at a time and a run building an older
+# commit can never move the mutable main tags backward after a newer run
+# has published them; the tip check in the tags step relies on this
 # serialization.
 concurrency:
   group: publish-quay-${{ github.ref }}
@@ -255,6 +260,7 @@ jobs:
               echo "- mutable \`main\` tags: not published (sha tag only)"
             fi
             echo "- SBOM artifact: \`praxis-ai-sbom-$SOURCE_SHA\`"
+            echo "- superseded publishes: a newer push replaces a pending publish run; the superseded commit is built via the manual dispatch path"
             echo "- workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           } >> "$GITHUB_STEP_SUMMARY"
 

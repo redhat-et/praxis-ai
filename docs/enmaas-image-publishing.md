@@ -146,10 +146,14 @@ leaves, and otherwise on a regular schedule (at least every 90 days).
 
 ## Release and consumption policy
 
-- Every push to `main` produces a development image:
+- Each push to `main` triggers a publish run for that commit:
   - `:main` is a mutable convenience tag, updated only by a `main` push whose
     commit is still the branch tip.
   - `:sha-<full 40-character commit SHA>` identifies the build for that commit.
+- Publications are serialized per branch: GitHub Actions keeps at most one
+  running and one pending publish, and a newer push replaces the pending run.
+  A commit whose publish run is superseded receives no image, SBOM, or
+  `:sha-` tag until it is built by the manual dispatch path.
 - Manual dispatches produce only the `:sha-` tag for the selected commit.
 - Tags are convenience pointers. The image digest is the immutable reference.
 - The workflow records `quay.io/modden/praxis-ai@sha256:...` and
