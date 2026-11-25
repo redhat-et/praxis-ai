@@ -23,8 +23,8 @@ quay.io/redhat-et/praxis-ai
 
 The mirror is a registry-side `skopeo` copy of the built image at its digest.
 It preserves the pushed image index and its attestation manifests
-byte-for-byte — a daemon pull/tag/push would flatten the index to a
-single-platform manifest at a different digest — and the publish job fails
+byte-for-byte (a daemon pull/tag/push would flatten the index to a
+single-platform manifest at a different digest), and the publish job fails
 unless the mirrored digest is identical to the built digest. The run summary
 records both repository references. Moving the primary namespace later
 requires changing the workflow `IMAGE` value, updating the GitHub Actions
@@ -119,7 +119,7 @@ Three separate robot accounts are used:
 
 The build login uses `docker/login-action`, so the primary builder
 credentials are passed as action inputs and never interpolated into a shell
-command. The mirror uses `skopeo` with two separate `0600` authfiles — one
+command. The mirror uses `skopeo` with two separate `0600` authfiles, one
 per Quay credential, because both repositories share the `quay.io` registry
 host and a single docker login cannot hold both. The tokens are read from
 stdin and the authfiles are deleted when the mirror step exits. All four
@@ -153,8 +153,8 @@ leaves, and otherwise on a regular schedule (at least every 90 days).
 - Manual dispatches produce only the `:sha-` tag for the selected commit.
 - Tags are convenience pointers. The image digest is the immutable reference.
 - The workflow records `quay.io/modden/praxis-ai@sha256:...` and
-  `quay.io/redhat-et/praxis-ai@sha256:...` — the same digest, mirrored and
-  verified by the publish job — plus the source commit and the SBOM artifact
+  `quay.io/redhat-et/praxis-ai@sha256:...` (the same digest, mirrored and
+  verified by the publish job), plus the source commit and the SBOM artifact
   name in the Actions run summary. That digest is the authoritative
   deployment reference.
 - Deploy by digest. Never deploy `:main`.
