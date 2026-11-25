@@ -72,6 +72,31 @@ jobs:
           fi
           git checkout --detach "${SOURCE_SHA}"
 
+      - name: Check publish credentials
+        # Runs before anything is built or published so a missing mirror
+        # secret fails the job with no image pushed and no mutable tag
+        # moved on either registry.
+        env:
+          QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+          QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
+          QUAY_ORG_USERNAME: ${{ secrets.QUAY_ORG_USERNAME }}
+          QUAY_ORG_TOKEN: ${{ secrets.QUAY_ORG_TOKEN }}
+        shell: bash
+        run: |
+          for secret in QUAY_USERNAME QUAY_TOKEN QUAY_ORG_USERNAME QUAY_ORG_TOKEN; do
+            if [ -z "${!secret}" ]; then
+              echo "::error::${secret} is not set; nothing has been published"
+              exit 1
+            fi
+          done
+
+      - name: Install skopeo
+        # Installed before the build so an apt or packaging failure cannot
+        # leave the interim registry's mutable main tag ahead of the mirror.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
@@ -87,6 +112,7 @@ jobs:
         env:
           IMAGE: ${{ env.IMAGE }}
           SOURCE_SHA: ${{ env.SOURCE_SHA }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           publish_main=false
           if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF}" = "refs/heads/main" ]; then
@@ -94,7 +120,7 @@ jobs:
             # the branch tip. Runs are serialized per branch (see the
             # workflow concurrency group), so no newer publisher can land
             # between this check and the pushes below.
-            tip=$(git ls-remote "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" refs/heads/main | cut -f1)
+            tip=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
             if [[ ! "${tip}" =~ ^[0-9a-f]{40}$ ]]; then
               echo "::error::could not resolve the current tip of main"
               exit 1
@@ -166,11 +192,6 @@ jobs:
             image.spdx.json
           retention-days: 90
 
-      - name: Install skopeo
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y skopeo
-
       - name: Mirror the image index to the Red Hat repository
         env:
           QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
@@ -236,3 +257,7 @@ jobs:
             echo "- SBOM artifact: \`praxis-ai-sbom-$SOURCE_SHA\`"
             echo "- workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Log out of Quay
+        if: always()
+        run: docker logout quay.io || true

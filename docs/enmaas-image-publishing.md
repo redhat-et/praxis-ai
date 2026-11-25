@@ -122,7 +122,11 @@ credentials are passed as action inputs and never interpolated into a shell
 command. The mirror uses `skopeo` with two separate `0600` authfiles — one
 per Quay credential, because both repositories share the `quay.io` registry
 host and a single docker login cannot hold both. The tokens are read from
-stdin and the authfiles are deleted when the mirror step exits.
+stdin and the authfiles are deleted when the mirror step exits. All four
+secrets are verified present before the build starts, so a missing robot
+credential fails the publish with nothing pushed to either registry, and
+the builder login is removed from the runner by an always-run logout at
+the end of the job.
 
 ## Rotation
 
