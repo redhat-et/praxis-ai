@@ -2,10 +2,16 @@ name: Publish (quay)
 
 # Fork-side quay publish. The upstream publish.yaml targets GHCR on a
 # nightly schedule with FIPS variants; this workflow pushes the EnMaaS
-# deployment image (quay.io/modden/praxis-ai) on every push to main so
-# deployment digest pins track the fork. Keeping it a separate file means
-# upstream rebases never conflict with it. Ownership, rotation, and the
-# release policy are documented in docs/enmaas-image-publishing.md.
+# deployment image to quay.io/modden/praxis-ai (interim personal
+# namespace) on every push to main and mirrors the identical image index
+# to the org-owned quay.io/redhat-et/praxis-ai, so deployment digest pins
+# track the fork. The mirror is a registry-side skopeo copy: it preserves
+# the pushed index and its attestation manifests at the same digest and
+# never passes the image through the daemon image store, which would
+# flatten the index to a single-platform manifest at a different digest.
+# Keeping this workflow a separate file means upstream rebases never
+# conflict with it. Ownership, rotation, and the release policy are
+# documented in docs/enmaas-image-publishing.md.
 
 on:
   push:
@@ -17,8 +23,18 @@ on:
         required: false
         type: string
 
+# Serialize publications per branch. GitHub Actions keeps at most one
+# running and one pending run per group, and a newer run replaces the
+# pending one, so when several commits land on main in quick succession
+# the superseded commits' publishes are skipped: they receive no image,
+# SBOM, or sha- tag until they are built by the manual dispatch path. A
+# running publish is never cancelled (cancel-in-progress is false), so
+# exactly one publish executes at a time and a run building an older
+# commit can never move the mutable main tags backward after a newer run
+# has published them; the tip check in the tags step relies on this
+# serialization.
 concurrency:
-  group: publish-quay-${{ inputs.commit || github.sha }}
+  group: publish-quay-${{ github.ref }}
   cancel-in-progress: false
 
 permissions: {}
@@ -31,6 +47,7 @@ jobs:
       contents: read
     env:
       IMAGE: quay.io/modden/praxis-ai
+      REDHAT_IMAGE: quay.io/redhat-et/praxis-ai
       # Upstream full excludes the opt-in OpenAI groups and stores.
       # Retain the deployed fork capabilities explicitly.
       PRAXIS_AI_FEATURES: full,openai-all,store-postgres,gcp-adc-filter,vertex-anthropic-filter,api-key-auth-filter
@@ -60,10 +77,35 @@ jobs:
           fi
           git checkout --detach "${SOURCE_SHA}"
 
+      - name: Check publish credentials
+        # Runs before anything is built or published so a missing mirror
+        # secret fails the job with no image pushed and no mutable tag
+        # moved on either registry.
+        env:
+          QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+          QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
+          QUAY_ORG_USERNAME: ${{ secrets.QUAY_ORG_USERNAME }}
+          QUAY_ORG_TOKEN: ${{ secrets.QUAY_ORG_TOKEN }}
+        shell: bash
+        run: |
+          for secret in QUAY_USERNAME QUAY_TOKEN QUAY_ORG_USERNAME QUAY_ORG_TOKEN; do
+            if [ -z "${!secret}" ]; then
+              echo "::error::${secret} is not set; nothing has been published"
+              exit 1
+            fi
+          done
+
+      - name: Install skopeo
+        # Installed before the build so an apt or packaging failure cannot
+        # leave the interim registry's mutable main tag ahead of the mirror.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: Log in to quay
+      - name: Log in to Quay
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: quay.io
@@ -75,14 +117,33 @@ jobs:
         env:
           IMAGE: ${{ env.IMAGE }}
           SOURCE_SHA: ${{ env.SOURCE_SHA }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          publish_main=false
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            # Move the mutable main tags only while this commit is still
+            # the branch tip. Runs are serialized per branch (see the
+            # workflow concurrency group), so no newer publisher can land
+            # between this check and the pushes below.
+            tip=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
+            if [[ ! "${tip}" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::could not resolve the current tip of main"
+              exit 1
+            fi
+            if [ "${SOURCE_SHA}" = "${tip}" ]; then
+              publish_main=true
+            else
+              echo "::notice::${SOURCE_SHA} is no longer the tip of main; publishing the sha tag only"
+            fi
+          fi
           {
             echo "tags<<EOF"
             echo "${IMAGE}:sha-${SOURCE_SHA}"
-            if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            if [ "${publish_main}" = true ]; then
               echo "${IMAGE}:main"
             fi
             echo "EOF"
+            echo "publish_main=${publish_main}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Build and push
@@ -136,21 +197,70 @@ jobs:
             image.spdx.json
           retention-days: 90
 
+      - name: Mirror the image index to the Red Hat repository
+        env:
+          QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+          QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
+          QUAY_ORG_USERNAME: ${{ secrets.QUAY_ORG_USERNAME }}
+          QUAY_ORG_TOKEN: ${{ secrets.QUAY_ORG_TOKEN }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          PUBLISH_MAIN: ${{ steps.tags.outputs.publish_main }}
+        run: |
+          set -euo pipefail
+          test -n "$DIGEST"
+          # Registry-side copy. Preserves the pushed index and its
+          # attestation manifests byte-for-byte, which a daemon
+          # pull/tag/push cannot do. Separate 0600 authfiles keep the two
+          # quay.io credentials apart; the tokens are read from stdin and
+          # the authfiles are deleted when the step exits.
+          umask 077
+          auth=$(mktemp -d)
+          trap 'rm -rf "$auth"' EXIT
+          src="${auth}/source.json"
+          dest="${auth}/destination.json"
+          printf '%s' "$QUAY_TOKEN" | skopeo login --authfile "$src" \
+            --username "$QUAY_USERNAME" --password-stdin quay.io
+          printf '%s' "$QUAY_ORG_TOKEN" | skopeo login --authfile "$dest" \
+            --username "$QUAY_ORG_USERNAME" --password-stdin quay.io
+          mirror_tags=("sha-${SOURCE_SHA}")
+          if [ "${PUBLISH_MAIN}" = true ]; then
+            mirror_tags+=(main)
+          fi
+          for tag in "${mirror_tags[@]}"; do
+            skopeo copy --all --preserve-digests --retry-times 5 \
+              --src-authfile "$src" --dest-authfile "$dest" \
+              "docker://${IMAGE}@${DIGEST}" "docker://${REDHAT_IMAGE}:${tag}"
+            mirrored="sha256:$(skopeo inspect --authfile "$dest" --raw \
+              "docker://${REDHAT_IMAGE}:${tag}" | sha256sum | cut -d' ' -f1)"
+            if [ "${mirrored}" != "${DIGEST}" ]; then
+              echo "::error::${REDHAT_IMAGE}:${tag} resolved to ${mirrored}, expected ${DIGEST}"
+              exit 1
+            fi
+          done
+
       - name: Record digest
         id: digest
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
+          PUBLISH_MAIN: ${{ steps.tags.outputs.publish_main }}
         run: |
           test -n "$DIGEST"
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           {
             echo "### Published praxis-ai image"
             echo ""
-            echo "\`$IMAGE@$DIGEST\`"
+            echo "\`$IMAGE@$DIGEST\` (canonical)"
+            echo "\`$REDHAT_IMAGE@$DIGEST\` (registry-side mirror, digest verified)"
             echo ""
             echo "- source commit: \`$SOURCE_SHA\`"
             echo "- ref: \`$GITHUB_REF\`"
+            if [ "${PUBLISH_MAIN}" = true ]; then
+              echo "- mutable \`main\` tags: published (this commit is the branch tip)"
+            else
+              echo "- mutable \`main\` tags: not published (sha tag only)"
+            fi
             echo "- SBOM artifact: \`praxis-ai-sbom-$SOURCE_SHA\`"
+            echo "- superseded publishes: a newer push replaces a pending publish run; the superseded commit is built via the manual dispatch path"
             echo "- workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           } >> "$GITHUB_STEP_SUMMARY"
 
